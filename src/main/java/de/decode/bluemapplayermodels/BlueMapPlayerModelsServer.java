@@ -9,14 +9,33 @@ import com.mojang.logging.LogUtils;
 import de.bluecolored.bluemap.api.AssetStorage;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
+import net.minecraft.SharedConstants;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.packs.FilePackResources;
+import net.minecraft.server.packs.PackResources;
+import net.minecraft.server.packs.PackType;
+import net.minecraft.server.packs.PathPackResources;
+import net.minecraft.server.packs.metadata.pack.PackMetadataSection;
+import net.minecraft.server.packs.resources.MultiPackResourceManager;
+import net.minecraft.server.packs.resources.Resource;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.HumanoidArm;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.ArmorItem;
+import net.minecraft.world.item.CrossbowItem;
 import net.minecraft.world.item.DyeableLeatherItem;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.SpawnEggItem;
+import net.minecraft.world.item.alchemy.PotionUtils;
+import net.minecraft.world.item.armortrim.ArmorTrim;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
@@ -24,14 +43,20 @@ import net.minecraftforge.event.entity.player.PlayerEvent;
 import net.minecraftforge.event.server.ServerStartedEvent;
 import net.minecraftforge.event.server.ServerStoppingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.ModList;
+import net.minecraftforge.fml.loading.FMLPaths;
 import net.minecraftforge.registries.ForgeRegistries;
+import net.minecraftforge.resource.DelegatingPackResources;
+import net.minecraftforge.resource.ResourcePackLoader;
 import org.slf4j.Logger;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -42,17 +67,20 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -62,8 +90,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
 
 final class BlueMapPlayerModelsServer {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -75,20 +101,15 @@ final class BlueMapPlayerModelsServer {
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
     private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
-    private static final String WEB_ASSET_VERSION = "1.1.1";
+    private static final String WEB_ASSET_VERSION = "1.2.0";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
+    private static final int RESOURCE_MANIFEST_FORMAT = 1;
     private static final int MAX_SKIN_BYTES = 2_000_000;
     private static final int ENTITY_LIMIT = 128;
     private static final long SKIN_RETRY_DELAY_MS = 60_000;
     private static final long SKIN_REFRESH_MS = 24 * 60 * 60 * 1_000L;
     private static final Pattern DATA_PATH = Pattern.compile(
         "^\\s*data\\s*:\\s*(?:\"([^\"]+)\"|'([^']+)'|([^\\s#]+))\\s*(?:#.*)?$"
-    );
-    private static final List<String> TEXTURE_PREFIXES = List.of(
-        "assets/minecraft/textures/entity/",
-        "assets/minecraft/textures/models/armor/",
-        "assets/minecraft/textures/item/",
-        "assets/minecraft/textures/block/"
     );
 
     private final Map<UUID, PlayerData> players = new ConcurrentHashMap<>();
@@ -179,7 +200,7 @@ final class BlueMapPlayerModelsServer {
             String style = "player-models-" + WEB_ASSET_VERSION + ".css";
             copyResource("/web/player-models.js", root.resolve(ASSET_ROOT).resolve(script));
             copyResource("/web/player-models.css", root.resolve(ASSET_ROOT).resolve(style));
-            exportMinecraftTextures(root.resolve(ASSET_ROOT).resolve("minecraft"));
+            publishClientResources(root.resolve(ASSET_ROOT));
             api.getWebApp().registerScript(ASSET_ROOT + "/" + script);
             api.getWebApp().registerStyle(ASSET_ROOT + "/" + style);
             skinRoot = Files.createDirectories(root.resolve(ASSET_ROOT).resolve("skins"));
@@ -276,7 +297,7 @@ final class BlueMapPlayerModelsServer {
         PlayerData previous = players.get(player.getUUID());
         PlayerData data = new PlayerData();
         data.uuid = player.getStringUUID();
-        data.name = player.getGameProfile().getName();
+        data.name = player.getDisplayName().getString();
         data.online = online;
         data.moving = online && player.getDeltaMovement().horizontalDistanceSqr() > 0.0004;
         data.crouching = player.isCrouching();
@@ -294,16 +315,27 @@ final class BlueMapPlayerModelsServer {
         data.slim = skin.slim();
         data.skin = skinAssets.get(player.getUUID());
 
-        data.mainHand = item(player.getMainHandItem());
-        data.offHand = item(player.getOffhandItem());
+        boolean usingMainHand = player.isUsingItem()
+            && player.getUsedItemHand() == InteractionHand.MAIN_HAND;
+        boolean usingOffHand = player.isUsingItem()
+            && player.getUsedItemHand() == InteractionHand.OFF_HAND;
+        data.mainHand = item(player.getMainHandItem(), player, usingMainHand, true);
+        data.offHand = item(player.getOffhandItem(), player, usingOffHand, true);
         data.armor = Arrays.asList(
-            item(player.getItemBySlot(EquipmentSlot.HEAD)),
-            item(player.getItemBySlot(EquipmentSlot.CHEST)),
-            item(player.getItemBySlot(EquipmentSlot.LEGS)),
-            item(player.getItemBySlot(EquipmentSlot.FEET))
+            item(player.getItemBySlot(EquipmentSlot.HEAD), player, false, false),
+            item(player.getItemBySlot(EquipmentSlot.CHEST), player, false, false),
+            item(player.getItemBySlot(EquipmentSlot.LEGS), player, false, false),
+            item(player.getItemBySlot(EquipmentSlot.FEET), player, false, false)
         );
         data.inventory = new ArrayList<>(player.getInventory().items.size());
-        player.getInventory().items.forEach(stack -> data.inventory.add(item(stack)));
+        for (int index = 0; index < player.getInventory().items.size(); index++) {
+            data.inventory.add(item(
+                player.getInventory().items.get(index),
+                player,
+                usingMainHand && index == data.selectedSlot,
+                index == data.selectedSlot
+            ));
+        }
         players.put(player.getUUID(), data);
         cacheSkin(player.getUUID(), skin.uri());
     }
@@ -318,7 +350,12 @@ final class BlueMapPlayerModelsServer {
         return previous == null ? null : previous.worldId;
     }
 
-    private static ItemData item(ItemStack stack) {
+    private static ItemData item(
+        ItemStack stack,
+        ServerPlayer user,
+        boolean active,
+        boolean held
+    ) {
         if (stack.isEmpty()) {
             return null;
         }
@@ -330,10 +367,81 @@ final class BlueMapPlayerModelsServer {
         item.damage = stack.getDamageValue();
         item.maxDamage = stack.getMaxDamage();
         item.glint = stack.hasFoil();
+        item.active = active;
+        item.leftHanded = user != null && user.getMainArm() == HumanoidArm.LEFT;
+        item.cast = user != null
+            && held
+            && user.fishing != null
+            && stack.is(Items.FISHING_ROD);
+        item.charged = stack.getItem() instanceof CrossbowItem && CrossbowItem.isCharged(stack);
+        item.firework = stack.getItem() instanceof CrossbowItem
+            && CrossbowItem.containsChargedProjectile(stack, Items.FIREWORK_ROCKET);
+        item.filled = stack.is(Items.BUNDLE)
+            && stack.hasTag()
+            && !stack.getTag().getList("Items", Tag.TAG_COMPOUND).isEmpty();
+        if (stack.is(Items.LIGHT) && stack.hasTag()) {
+            CompoundTag blockState = stack.getTag().getCompound("BlockStateTag");
+            try {
+                item.level = Math.max(0, Math.min(15, Integer.parseInt(blockState.getString("level"))))
+                    / 15.0F;
+            } catch (NumberFormatException ignored) {
+                item.level = 0;
+            }
+        }
+        if (active) {
+            int usedTicks = Math.max(
+                0,
+                stack.getUseDuration() - user.getUseItemRemainingTicks()
+            );
+            item.useProgress = stack.getItem() instanceof CrossbowItem
+                ? usedTicks / (float) Math.max(1, CrossbowItem.getChargeDuration(stack))
+                : usedTicks / 20.0F;
+        }
+        if (stack.hasTag()
+            && stack.getTag().contains("CustomModelData", Tag.TAG_ANY_NUMERIC)) {
+            item.customModelData = stack.getTag().getInt("CustomModelData");
+        }
         if (stack.getItem() instanceof DyeableLeatherItem dyeable) {
             item.color = String.format("#%06x", dyeable.getColor(stack));
         }
+        if (stack.getItem() instanceof ArmorItem armor) {
+            item.armorTexture = armorTexture(armor, false);
+            if (stack.getItem() instanceof DyeableLeatherItem) {
+                item.armorOverlayTexture = armorTexture(armor, true);
+            }
+        }
+        if (user != null) {
+            ArmorTrim.getTrim(user.level().registryAccess(), stack).ifPresent(trim -> {
+                item.trimType = trim.material().value().itemModelIndex();
+                if (stack.getItem() instanceof ArmorItem armor) {
+                    item.trimTexture = (armor.getType() == ArmorItem.Type.LEGGINGS
+                        ? trim.innerTexture(armor.getMaterial())
+                        : trim.outerTexture(armor.getMaterial())).toString();
+                }
+            });
+        }
+        if (stack.getItem() instanceof SpawnEggItem egg) {
+            item.tints = List.of(
+                String.format("#%06x", egg.getColor(0)),
+                String.format("#%06x", egg.getColor(1))
+            );
+        } else if (stack.is(Items.POTION)
+            || stack.is(Items.SPLASH_POTION)
+            || stack.is(Items.LINGERING_POTION)
+            || stack.is(Items.TIPPED_ARROW)) {
+            item.tints = List.of(String.format("#%06x", PotionUtils.getColor(stack)));
+        }
         return item;
+    }
+
+    private static String armorTexture(ArmorItem armor, boolean overlay) {
+        ResourceLocation material = ResourceLocation.tryParse(armor.getMaterial().getName());
+        if (material == null) {
+            return null;
+        }
+        int layer = armor.getType() == ArmorItem.Type.LEGGINGS ? 2 : 1;
+        return material.getNamespace() + ":models/armor/" + material.getPath()
+            + "_layer_" + layer + (overlay ? "_overlay" : "");
     }
 
     private static SkinInfo skinInfo(ServerPlayer player) {
@@ -556,54 +664,490 @@ final class BlueMapPlayerModelsServer {
         }
     }
 
-    private static void exportMinecraftTextures(Path targetRoot) {
-        Path minecraftClient = findMinecraftClient();
-        if (minecraftClient == null) {
-            LOGGER.warn(
-                "Could not find {}; entity and item textures will use browser fallbacks",
-                MINECRAFT_CLIENT
+    private static void publishClientResources(Path targetRoot) {
+        try {
+            List<PackResources> packs = clientResourcePacks();
+            if (packs.isEmpty()) {
+                LOGGER.warn("No client resource packs were available; keeping the previous resource manifest");
+                return;
+            }
+
+            Path safeRoot = Files.createDirectories(targetRoot).toAbsolutePath().normalize();
+            Path objectsRoot = Files.createDirectories(resolveInside(safeRoot, "resources/objects"));
+            Map<String, String> models = new TreeMap<>();
+            Map<String, String> textures = new TreeMap<>();
+            Map<String, String> metadata = new TreeMap<>();
+            Map<String, String> atlases = new TreeMap<>();
+
+            try (MultiPackResourceManager resources =
+                     new MultiPackResourceManager(PackType.CLIENT_RESOURCES, packs)) {
+                Map<ResourceLocation, Resource> textureResources = resources.listResources(
+                    "textures",
+                    id -> id.getPath().endsWith(".png")
+                );
+                Map<ResourceLocation, Resource> atlasResources = resources.listResources(
+                    "atlases",
+                    id -> id.getPath().endsWith(".json")
+                );
+                publishResources(
+                    resources.listResources("models", id -> id.getPath().endsWith(".json")),
+                    "models/",
+                    ".json",
+                    "json",
+                    objectsRoot,
+                    models
+                );
+                publishResources(
+                    textureResources,
+                    "textures/",
+                    ".png",
+                    "png",
+                    objectsRoot,
+                    textures
+                );
+                publishTextureMetadata(
+                    resources,
+                    textureResources,
+                    objectsRoot,
+                    metadata
+                );
+                publishResources(
+                    atlasResources,
+                    "atlases/",
+                    ".json",
+                    "json",
+                    objectsRoot,
+                    atlases
+                );
+                publishAtlasTextures(
+                    resources,
+                    atlasResources,
+                    textureResources,
+                    objectsRoot,
+                    textures,
+                    metadata
+                );
+            }
+
+            String generation = resourceGeneration(models, textures, metadata, atlases);
+            writeResourceManifest(
+                safeRoot,
+                new ResourceManifest(
+                    RESOURCE_MANIFEST_FORMAT,
+                    generation,
+                    models,
+                    textures,
+                    metadata,
+                    atlases
+                )
             );
-            return;
+            // ponytail: immutable orphan objects stay cached; prune if web-root growth becomes measurable.
+            LOGGER.info(
+                "Published client-resource manifest {} with {} model(s), {} texture(s), "
+                    + "{} metadata file(s), and {} atlas file(s)",
+                generation,
+                models.size(),
+                textures.size(),
+                metadata.size(),
+                atlases.size()
+            );
+        } catch (IOException | RuntimeException exception) {
+            LOGGER.warn("Failed to publish client resources; keeping the previous manifest", exception);
+        }
+    }
+
+    private static void publishTextureMetadata(
+        MultiPackResourceManager resources,
+        Map<ResourceLocation, Resource> textures,
+        Path objectsRoot,
+        Map<String, String> manifestEntries
+    ) throws IOException {
+        Map<String, Integer> packPriorities = new HashMap<>();
+        List<PackResources> packs = resources.listPacks().toList();
+        for (int index = 0; index < packs.size(); index++) {
+            packPriorities.put(packs.get(index).packId(), index);
         }
 
-        Path safeRoot = targetRoot.toAbsolutePath().normalize();
-        int copied = 0;
-        try (ZipFile client = new ZipFile(minecraftClient.toFile())) {
-            var entries = client.entries();
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                String name = entry.getName();
-                if (entry.isDirectory()
-                    || !name.endsWith(".png")
-                    || TEXTURE_PREFIXES.stream().noneMatch(name::startsWith)) {
-                    continue;
+        for (var entry : new TreeMap<>(textures).entrySet()) {
+            ResourceLocation id = entry.getKey();
+            int texturePriority = packPriorities.getOrDefault(entry.getValue().sourcePackId(), 0);
+            Resource metadata = null;
+            for (Resource candidate : resources.getResourceStack(id.withSuffix(".mcmeta"))) {
+                if (packPriorities.getOrDefault(candidate.sourcePackId(), 0) >= texturePriority) {
+                    metadata = candidate;
                 }
-
-                Path target = safeRoot.resolve(name).normalize();
-                if (!target.startsWith(safeRoot)) {
-                    LOGGER.warn("Skipped unsafe path in {}: {}", minecraftClient, name);
-                    continue;
-                }
-                if (Files.isRegularFile(target)
-                    && entry.getSize() >= 0
-                    && Files.size(target) == entry.getSize()) {
-                    continue;
-                }
-
-                Files.createDirectories(target.getParent());
-                try (InputStream input = client.getInputStream(entry)) {
-                    Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING);
-                }
-                copied++;
             }
-            LOGGER.info(
-                "Exported {} vanilla texture(s) from {} to {}",
-                copied,
-                minecraftClient,
-                safeRoot
+            if (metadata == null) {
+                continue;
+            }
+
+            String path = id.getPath();
+            String key = id.getNamespace() + ":"
+                + path.substring("textures/".length(), path.length() - ".png".length());
+            manifestEntries.put(key, publishResourceObject(objectsRoot, metadata, "mcmeta"));
+        }
+    }
+
+    private static List<PackResources> clientResourcePacks() throws IOException {
+        List<PackResources> packs = new ArrayList<>();
+        Path minecraftClient = findMinecraftClient();
+        if (minecraftClient == null) {
+            LOGGER.warn("Could not find {}; keeping the previous resource manifest", MINECRAFT_CLIENT);
+            return packs;
+        }
+        packs.add(new FilePackResources("bpm-vanilla", minecraftClient.toFile(), true));
+
+        List<PackResources> modPacks = ModList.get().getModFiles().stream()
+            .filter(file -> file.requiredLanguageLoaders().stream()
+                .noneMatch(loader -> "minecraft".equals(loader.languageName())))
+            .map(ResourcePackLoader::createPackForMod)
+            .map(PackResources.class::cast)
+            .toList();
+        if (!modPacks.isEmpty()) {
+            packs.add(new DelegatingPackResources(
+                "bpm-mod-resources",
+                true,
+                new PackMetadataSection(
+                    Component.literal("Loaded mod resources"),
+                    SharedConstants.getCurrentVersion().getPackVersion(PackType.CLIENT_RESOURCES)
+                ),
+                modPacks
+            ));
+        }
+
+        Path packsFolder = FMLPaths.CONFIGDIR.get()
+            .resolve("bluemap")
+            .resolve("packs");
+        if (Files.isDirectory(packsFolder)) {
+            try (var entries = Files.list(packsFolder)) {
+                entries
+                    .filter(path -> Files.isDirectory(path)
+                        || path.getFileName().toString()
+                            .toLowerCase(java.util.Locale.ROOT)
+                            .endsWith(".zip"))
+                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                    .forEach(path -> packs.add(Files.isDirectory(path)
+                        ? new PathPackResources("bpm-pack-" + path.getFileName(), path, false)
+                        : new FilePackResources("bpm-pack-" + path.getFileName(), path.toFile(), false)));
+            }
+        }
+        return packs;
+    }
+
+    private static void publishAtlasTextures(
+        MultiPackResourceManager resources,
+        Map<ResourceLocation, Resource> atlases,
+        Map<ResourceLocation, Resource> sourceTextures,
+        Path objectsRoot,
+        Map<String, String> textures,
+        Map<String, String> metadata
+    ) throws IOException {
+        for (ResourceLocation atlasId : new TreeMap<>(atlases).keySet()) {
+            for (Resource atlas : resources.getResourceStack(atlasId)) {
+                JsonObject root;
+                try (InputStreamReader reader =
+                         new InputStreamReader(atlas.open(), StandardCharsets.UTF_8)) {
+                    root = JsonParser.parseReader(reader).getAsJsonObject();
+                } catch (RuntimeException exception) {
+                    LOGGER.warn("Skipping malformed client atlas {}", atlasId, exception);
+                    continue;
+                }
+                if (!root.has("sources") || !root.get("sources").isJsonArray()) {
+                    continue;
+                }
+                int sourceIndex = 0;
+                for (var sourceElement : root.getAsJsonArray("sources")) {
+                    try {
+                        JsonObject source = sourceElement.getAsJsonObject();
+                        String type = source.get("type").getAsString();
+                        if (type.startsWith("minecraft:")) {
+                            type = type.substring("minecraft:".length());
+                        }
+                        if ("single".equals(type)) {
+                            publishAtlasAlias(source, textures, metadata);
+                        } else if ("paletted_permutations".equals(type)) {
+                            publishPaletteTextures(
+                                source,
+                                sourceTextures,
+                                objectsRoot,
+                                textures,
+                                metadata
+                            );
+                        }
+                    } catch (RuntimeException exception) {
+                        LOGGER.warn(
+                            "Skipping invalid source {} in client atlas {}",
+                            sourceIndex,
+                            atlasId,
+                            exception
+                        );
+                    }
+                    sourceIndex++;
+                }
+            }
+        }
+    }
+
+    private static void publishAtlasAlias(
+        JsonObject source,
+        Map<String, String> textures,
+        Map<String, String> metadata
+    ) {
+        ResourceLocation resource = resourceLocation(source, "resource");
+        ResourceLocation sprite = source.has("sprite")
+            ? resourceLocation(source, "sprite")
+            : resource;
+        String object = textures.get(resource.toString());
+        if (object != null) {
+            textures.put(sprite.toString(), object);
+            String animation = metadata.get(resource.toString());
+            if (animation == null) {
+                metadata.remove(sprite.toString());
+            } else {
+                metadata.put(sprite.toString(), animation);
+            }
+        }
+    }
+
+    private static void publishPaletteTextures(
+        JsonObject source,
+        Map<ResourceLocation, Resource> sourceTextures,
+        Path objectsRoot,
+        Map<String, String> textures,
+        Map<String, String> metadata
+    ) throws IOException {
+        BufferedImage paletteKey = readTexture(
+            sourceTextures,
+            resourceLocation(source, "palette_key")
+        );
+        if (paletteKey == null) {
+            return;
+        }
+        int width = paletteKey.getWidth();
+        int height = paletteKey.getHeight();
+        int[] keys = paletteKey.getRGB(0, 0, width, height, null, 0, width);
+
+        Map<String, Map<Integer, Integer>> palettes = new TreeMap<>();
+        for (var permutation : source.getAsJsonObject("permutations").entrySet()) {
+            BufferedImage values = readTexture(
+                sourceTextures,
+                ResourceLocation.tryParse(permutation.getValue().getAsString())
             );
-        } catch (IOException exception) {
-            LOGGER.warn("Failed to export vanilla textures from {}", minecraftClient, exception);
+            if (values == null || values.getWidth() != width || values.getHeight() != height) {
+                continue;
+            }
+            int[] colors = values.getRGB(0, 0, width, height, null, 0, width);
+            Map<Integer, Integer> palette = new HashMap<>();
+            for (int index = 0; index < keys.length; index++) {
+                if ((keys[index] >>> 24) != 0) {
+                    palette.put(keys[index] & 0x00ffffff, colors[index]);
+                }
+            }
+            palettes.put(permutation.getKey(), palette);
+        }
+
+        for (var textureElement : source.getAsJsonArray("textures")) {
+            ResourceLocation textureId = ResourceLocation.tryParse(textureElement.getAsString());
+            BufferedImage input = readTexture(sourceTextures, textureId);
+            if (input == null) {
+                continue;
+            }
+            int inputWidth = input.getWidth();
+            int inputHeight = input.getHeight();
+            int[] pixels = input.getRGB(
+                0,
+                0,
+                inputWidth,
+                inputHeight,
+                null,
+                0,
+                inputWidth
+            );
+            for (var permutation : palettes.entrySet()) {
+                int[] output = pixels.clone();
+                for (int index = 0; index < output.length; index++) {
+                    int sourceColor = output[index];
+                    int sourceAlpha = sourceColor >>> 24;
+                    if (sourceAlpha == 0) {
+                        continue;
+                    }
+                    int targetColor = permutation.getValue().getOrDefault(
+                        sourceColor & 0x00ffffff,
+                        0xff000000 | (sourceColor & 0x00ffffff)
+                    );
+                    int targetAlpha = targetColor >>> 24;
+                    output[index] = ((sourceAlpha * targetAlpha / 255) << 24)
+                        | (targetColor & 0x00ffffff);
+                }
+                BufferedImage image =
+                    new BufferedImage(inputWidth, inputHeight, BufferedImage.TYPE_INT_ARGB);
+                image.setRGB(0, 0, inputWidth, inputHeight, output, 0, inputWidth);
+                ResourceLocation generated =
+                    textureId.withSuffix("_" + permutation.getKey());
+                textures.put(
+                    generated.toString(),
+                    publishImageObject(objectsRoot, image)
+                );
+                metadata.remove(generated.toString());
+            }
+        }
+    }
+
+    private static ResourceLocation resourceLocation(JsonObject object, String key) {
+        ResourceLocation location = ResourceLocation.tryParse(object.get(key).getAsString());
+        if (location == null) {
+            throw new IllegalArgumentException("Invalid resource location in " + key);
+        }
+        return location;
+    }
+
+    private static BufferedImage readTexture(
+        Map<ResourceLocation, Resource> textures,
+        ResourceLocation id
+    ) throws IOException {
+        if (id == null) {
+            return null;
+        }
+        Resource resource = textures.get(
+            id.withPrefix("textures/").withSuffix(".png")
+        );
+        if (resource == null) {
+            return null;
+        }
+        try (InputStream input = resource.open()) {
+            try {
+                return ImageIO.read(input);
+            } catch (javax.imageio.IIOException exception) {
+                LOGGER.warn("Skipping unreadable client texture {}", id, exception);
+                return null;
+            }
+        }
+    }
+
+    private static void publishResources(
+        Map<ResourceLocation, Resource> resources,
+        String pathPrefix,
+        String pathSuffix,
+        String objectExtension,
+        Path objectsRoot,
+        Map<String, String> manifestEntries
+    ) throws IOException {
+        for (var entry : new TreeMap<>(resources).entrySet()) {
+            ResourceLocation id = entry.getKey();
+            String path = id.getPath();
+            if (!path.startsWith(pathPrefix) || !path.endsWith(pathSuffix)) {
+                continue;
+            }
+
+            String key = id.getNamespace() + ":"
+                + path.substring(pathPrefix.length(), path.length() - pathSuffix.length());
+            manifestEntries.put(key, publishResourceObject(objectsRoot, entry.getValue(), objectExtension));
+        }
+    }
+
+    private static String publishResourceObject(
+        Path objectsRoot,
+        Resource resource,
+        String extension
+    ) throws IOException {
+        try (InputStream input = resource.open()) {
+            return publishResourceObject(objectsRoot, input, extension);
+        }
+    }
+
+    private static String publishImageObject(
+        Path objectsRoot,
+        BufferedImage image
+    ) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        if (!ImageIO.write(image, "png", output)) {
+            throw new IOException("PNG encoder is unavailable");
+        }
+        try (InputStream input = new ByteArrayInputStream(output.toByteArray())) {
+            return publishResourceObject(objectsRoot, input, "png");
+        }
+    }
+
+    private static String publishResourceObject(
+        Path objectsRoot,
+        InputStream input,
+        String extension
+    ) throws IOException {
+        Path temporary = Files.createTempFile(objectsRoot, ".resource-", ".tmp");
+        try {
+            MessageDigest digest = sha256();
+            try (DigestOutputStream output =
+                     new DigestOutputStream(Files.newOutputStream(temporary), digest)) {
+                input.transferTo(output);
+            }
+
+            String fileName = HexFormat.of().formatHex(digest.digest()) + "." + extension;
+            Path target = resolveInside(objectsRoot, fileName);
+            if (!Files.isRegularFile(target) || Files.size(target) != Files.size(temporary)) {
+                replaceAtomically(temporary, target);
+            }
+            return "objects/" + fileName;
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
+
+    private static String resourceGeneration(
+        Map<String, String> models,
+        Map<String, String> textures,
+        Map<String, String> metadata,
+        Map<String, String> atlases
+    ) throws IOException {
+        MessageDigest digest = sha256();
+        digest.update(("format\0" + RESOURCE_MANIFEST_FORMAT + "\0").getBytes(StandardCharsets.UTF_8));
+        updateResourceDigest(digest, "models", models);
+        updateResourceDigest(digest, "textures", textures);
+        updateResourceDigest(digest, "metadata", metadata);
+        updateResourceDigest(digest, "atlases", atlases);
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static void updateResourceDigest(
+        MessageDigest digest,
+        String category,
+        Map<String, String> resources
+    ) {
+        digest.update(category.getBytes(StandardCharsets.UTF_8));
+        digest.update((byte) 0);
+        resources.forEach((key, value) -> {
+            digest.update(key.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+            digest.update(value.getBytes(StandardCharsets.UTF_8));
+            digest.update((byte) 0);
+        });
+    }
+
+    private static void writeResourceManifest(Path root, ResourceManifest manifest) throws IOException {
+        Path target = resolveInside(root, "resource-manifest.json");
+        Path temporary = Files.createTempFile(root, ".resource-manifest-", ".tmp");
+        try {
+            Files.writeString(temporary, GSON.toJson(manifest), StandardCharsets.UTF_8);
+            if (!Files.isRegularFile(target) || Files.mismatch(temporary, target) != -1) {
+                replaceAtomically(temporary, target);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
+    }
+
+    private static Path resolveInside(Path root, String relativePath) throws IOException {
+        Path target = root.resolve(relativePath).toAbsolutePath().normalize();
+        if (!target.startsWith(root)) {
+            throw new IOException("Unsafe resource output path: " + relativePath);
+        }
+        return target;
+    }
+
+    private static MessageDigest sha256() throws IOException {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IOException("SHA-256 is unavailable", exception);
         }
     }
 
@@ -782,6 +1326,15 @@ final class BlueMapPlayerModelsServer {
 
     private record State(List<PlayerData> players) {}
 
+    private record ResourceManifest(
+        int format,
+        String generation,
+        Map<String, String> models,
+        Map<String, String> textures,
+        Map<String, String> metadata,
+        Map<String, String> atlases
+    ) {}
+
     private static final class PlayerData {
         String uuid;
         String name;
@@ -809,10 +1362,24 @@ final class BlueMapPlayerModelsServer {
         String id;
         String name;
         String color;
+        List<String> tints;
         int count;
         int damage;
         int maxDamage;
+        int customModelData;
+        float useProgress;
+        float trimType;
+        float level;
+        String armorTexture;
+        String armorOverlayTexture;
+        String trimTexture;
         boolean glint;
+        boolean active;
+        boolean charged;
+        boolean firework;
+        boolean filled;
+        boolean cast;
+        boolean leftHanded;
     }
 
     private static final class EntityData {

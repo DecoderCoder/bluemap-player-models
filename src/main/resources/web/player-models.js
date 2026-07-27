@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.1.1";
+    const VERSION = "1.2.0";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
@@ -40,7 +40,145 @@
 
     const splitId = id => {
         const match = /^([a-z0-9_.-]+):([a-z0-9_./-]+)$/.exec(id || "");
-        return match ? {namespace: match[1], path: match[2]} : null;
+        return match
+            && !match[2].includes("..")
+            && !match[2].startsWith("/")
+            && !match[2].endsWith("/")
+            && !match[2].includes("//")
+            ? {namespace: match[1], path: match[2]}
+            : null;
+    };
+
+    const normalizeResourceId = (value, namespace = "minecraft") => {
+        if (typeof value !== "string" || value.startsWith("#")) return null;
+        const id = value.includes(":") ? value : `${namespace}:${value}`;
+        return splitId(id) ? id : null;
+    };
+
+    const itemVisualKey = item => item ? JSON.stringify([
+        item.id,
+        item.damage || 0,
+        item.maxDamage || 0,
+        item.color || null,
+        item.customModelData || 0,
+        item.tints || null,
+        item.trimType || 0,
+        item.armorTexture || null,
+        item.armorOverlayTexture || null,
+        item.trimTexture || null,
+        !!item.active,
+        item.useProgress || 0,
+        !!item.charged,
+        !!item.firework,
+        !!item.filled,
+        item.level || 0,
+        !!item.cast,
+        !!item.leftHanded
+    ]) : "";
+
+    const syncSlotNodes = (container, descriptors, create) => {
+        const existing = new Map(
+            Array.from(container.children, node => [node.dataset.slot, node])
+        );
+        descriptors.forEach((descriptor, index) => {
+            const key = itemVisualKey(descriptor.item);
+            let node = existing.get(descriptor.slot);
+            if (!node || node.dataset.itemKey !== key) {
+                const replacement = create(descriptor);
+                replacement.dataset.slot = descriptor.slot;
+                replacement.dataset.itemKey = key;
+                if (node) node.replaceWith(replacement);
+                else container.append(replacement);
+                node = replacement;
+            }
+            descriptor.update?.(node);
+            existing.delete(descriptor.slot);
+            const current = container.children[index];
+            if (current !== node) container.insertBefore(node, current || null);
+        });
+        existing.forEach(node => node.remove());
+    };
+
+    const modelPredicateValue = (name, item, context = {}) => {
+        switch (name.replace(/^minecraft:/, "")) {
+            case "custom_model_data": return Number(item?.customModelData || 0);
+            case "damage": return item?.maxDamage > 0 ? item.damage / item.maxDamage : 0;
+            case "damaged": return item?.damage > 0 ? 1 : 0;
+            case "broken": return item?.maxDamage > 0
+                && item.damage >= item.maxDamage - 1 ? 1 : 0;
+            case "lefthanded": return item?.leftHanded ? 1 : 0;
+            case "pulling":
+            case "blocking":
+            case "brushing":
+            case "throwing":
+            case "tooting": return item?.active ? 1 : 0;
+            case "pull": return Number(item?.useProgress || 0);
+            case "charged": return item?.charged ? 1 : 0;
+            case "firework": return item?.firework ? 1 : 0;
+            case "filled": return item?.filled ? 1 : 0;
+            case "level": return Number(item?.level || 0);
+            case "angle":
+            case "time": return 0;
+            case "cast": return item?.cast ? 1 : 0;
+            case "trim_type": return Number(item?.trimType || 0);
+            default: return null;
+        }
+    };
+
+    const modelOverrideMatches = (predicate, item, context) => Object.entries(predicate || {})
+        .every(([name, threshold]) => {
+            const value = modelPredicateValue(name, item, context);
+            return value !== null && value >= Number(threshold);
+        });
+
+    const resolveTextureReference = (textures, value, namespace = "minecraft") => {
+        const visited = new Set();
+        let current = value;
+        while (typeof current === "string" && current.startsWith("#")) {
+            const key = current.slice(1);
+            if (!key || visited.has(key)) return null;
+            visited.add(key);
+            current = textures?.[key];
+        }
+        return normalizeResourceId(current, namespace);
+    };
+
+    const defaultFaceUv = (from, to, direction) => {
+        switch (direction) {
+            case "down": return [from[0], 16 - to[2], to[0], 16 - from[2]];
+            case "up": return [from[0], from[2], to[0], to[2]];
+            case "north": return [16 - to[0], 16 - to[1], 16 - from[0], 16 - from[1]];
+            case "south": return [from[0], 16 - to[1], to[0], 16 - from[1]];
+            case "west": return [from[2], 16 - to[1], to[2], 16 - from[1]];
+            case "east": return [16 - to[2], 16 - to[1], 16 - from[2], 16 - from[1]];
+            default: return [0, 0, 16, 16];
+        }
+    };
+
+    const firstAnimationFrame = (metadata, width, height) => {
+        const animation = metadata?.animation;
+        if (!animation || width <= 0 || height <= 0) return null;
+        const fallback = Math.min(width, height);
+        const frameWidth = Number.isInteger(animation.width) && animation.width > 0
+            ? animation.width
+            : fallback;
+        const frameHeight = Number.isInteger(animation.height) && animation.height > 0
+            ? animation.height
+            : frameWidth;
+        if (width % frameWidth || height % frameHeight) return null;
+        const columns = width / frameWidth;
+        const rows = height / frameHeight;
+        const first = animation.frames?.[0];
+        const requested = Number(typeof first === "object" ? first?.index : first);
+        const index = Number.isInteger(requested) && requested >= 0 && requested < columns * rows
+            ? requested
+            : 0;
+        return {
+            repeatX: frameWidth / width,
+            repeatY: frameHeight / height,
+            offsetX: (index % columns) * frameWidth / width,
+            offsetY: 1 - (Math.floor(index / columns) + 1) * frameHeight / height
+        };
     };
 
     const armorTextureKey = (itemId, layer) => {
@@ -140,12 +278,19 @@
         globalThis.__BPM_TEST_API__ = {
             armorTextureKey,
             boxRegions,
+            defaultFaceUv,
             entityFamily,
             entityTextureKeys,
+            firstAnimationFrame,
             inventoryOrder,
+            itemVisualKey,
             mapAssetUrl,
+            modelOverrideMatches,
+            normalizeResourceId,
             normalizeInterval,
             playerDataUrl,
+            resolveTextureReference,
+            syncSlotNodes,
             splitId
         };
         return;
@@ -171,6 +316,10 @@
         const entities = new Map();
         const gallery = new Map();
         const textureCache = new Map();
+        const modelCache = new Map();
+        const modelJsonCache = new Map();
+        const metadataCache = new Map();
+        const itemIconCache = new Map();
         const settings = loadSettings();
         const ui = createUi();
         const panel = ui.querySelector("#bpm-panel");
@@ -181,6 +330,9 @@
         let generation = 0;
         let selectedPlayerId = null;
         let lastStatus = "";
+        let resourceManifest = {generation: VERSION, models: {}, textures: {}, metadata: {}};
+        let iconRenderer = null;
+        const resourceReady = loadResourceManifest();
         const dueAt = {players: 0, entities: 0};
 
         actorScene.name = "bluemap-live-actors";
@@ -235,7 +387,7 @@
                 ["heldItems", "Held items", "Show main-hand and off-hand items"],
                 ["offlinePlayers", "Offline players", "Keep logout positions in gray"],
                 ["entities", "Entities", "Show loaded non-player entities"],
-                ["labels", "Offline labels", "Show names beside logout positions"]
+                ["labels", "Player labels", "Show skin, name, and held item"]
             ];
             const list = ui.querySelector("#bpm-settings-list");
             for (const [key, label, detail] of definitions) {
@@ -335,11 +487,64 @@
             ui.querySelector("#bpm-entity-count").textContent = String(entities.size);
         }
 
+        async function optionalFetch(url) {
+            const request = new AbortController();
+            const timeout = setTimeout(() => request.abort(), 5000);
+            try {
+                return await fetch(url, {cache: "no-store", signal: request.signal});
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+
+        async function loadResourceManifest() {
+            try {
+                const response = await optionalFetch(
+                    `${addonRoot}resource-manifest.json?bpm=${VERSION}-${Date.now()}`
+                );
+                if (!response.ok) return;
+                const manifest = await response.json();
+                if (manifest?.format !== 1
+                    || typeof manifest.generation !== "string"
+                    || !manifest.models
+                    || !manifest.textures) return;
+                resourceManifest = manifest;
+            } catch (error) {
+                console.debug("BlueMap Player Models resource manifest is unavailable", error);
+            }
+        }
+
+        function resourceObjectUrl(collection, resource) {
+            const path = resourceManifest[collection]?.[resource];
+            if (typeof path !== "string"
+                || path.startsWith("/")
+                || path.includes("..")
+                || !/^objects\/[a-f0-9]{16,64}\.[a-z0-9.]+$/.test(path)) return null;
+            return `${new URL(`resources/${path}`, addonRoot).href}?v=${resourceManifest.generation}`;
+        }
+
         function textureUrl(resource) {
+            const exported = resourceObjectUrl("textures", resource);
+            if (exported) return exported;
             const id = splitId(resource);
             if (!id) return null;
             const path = id.path.split("/").map(encodeURIComponent).join("/");
             return `${addonRoot}minecraft/assets/${encodeURIComponent(id.namespace)}/textures/${path}.png`;
+        }
+
+        function modelUrl(resource) {
+            return resourceObjectUrl("models", resource);
+        }
+
+        function loadTextureMetadata(resource) {
+            if (!resource) return Promise.resolve(null);
+            if (!metadataCache.has(resource)) {
+                const url = resourceObjectUrl("metadata", resource);
+                metadataCache.set(resource, url
+                    ? fetch(url).then(response => response.ok ? response.json() : null).catch(() => null)
+                    : Promise.resolve(null));
+            }
+            return metadataCache.get(resource);
         }
 
         function itemTextureKeys(item) {
@@ -354,6 +559,7 @@
             texture.minFilter = Three.NearestFilter;
             texture.generateMipmaps = false;
             if (Three.SRGBColorSpace) texture.colorSpace = Three.SRGBColorSpace;
+            else if (Three.sRGBEncoding) texture.encoding = Three.sRGBEncoding;
             texture.needsUpdate = true;
             return texture;
         }
@@ -377,6 +583,7 @@
         }
 
         async function getTexture(resources) {
+            await resourceReady;
             for (const resource of resources.filter(Boolean)) {
                 const source = gallery.get(resource);
                 if (source) {
@@ -401,10 +608,7 @@
             gallery.clear();
             if (!map?.data?.texturesUrl) return;
             try {
-                const response = await fetch(
-                    `${map.data.texturesUrl}?bpm=${VERSION}`,
-                    {cache: "no-store"}
-                );
+                const response = await optionalFetch(`${map.data.texturesUrl}?bpm=${VERSION}`);
                 if (!response.ok) return;
                 const textures = await response.json();
                 if (token !== generation || !Array.isArray(textures)) return;
@@ -416,6 +620,371 @@
             } catch (error) {
                 console.debug("BlueMap actor texture gallery is unavailable", error);
             }
+        }
+
+        function loadModelJson(resource) {
+            if (!modelJsonCache.has(resource)) {
+                modelJsonCache.set(resource, (async () => {
+                    const url = modelUrl(resource);
+                    if (!url) return null;
+                    try {
+                        const response = await fetch(url);
+                        if (!response.ok) return null;
+                        const value = await response.json();
+                        return value && typeof value === "object" ? value : null;
+                    } catch {
+                        return null;
+                    }
+                })());
+            }
+            return modelJsonCache.get(resource);
+        }
+
+        async function resolveModel(resource, trail) {
+            if (!resource || trail.has(resource) || trail.size > 32) return null;
+            const id = splitId(resource);
+            if (!id) return null;
+            if (id.path === "builtin/generated" || id.path === "builtin/entity") {
+                return {
+                    id: resource,
+                    namespace: id.namespace,
+                    kind: id.path.slice("builtin/".length),
+                    textures: {},
+                    display: {},
+                    overrides: []
+                };
+            }
+
+            const raw = await loadModelJson(resource);
+            if (!raw) return null;
+            const nextTrail = new Set(trail);
+            nextTrail.add(resource);
+            const parentId = normalizeResourceId(raw.parent, "minecraft");
+            const parent = parentId ? await resolveModel(parentId, nextTrail) : null;
+            return {
+                id: resource,
+                namespace: id.namespace,
+                kind: parent?.kind || "elements",
+                textures: {...(parent?.textures || {}), ...(raw.textures || {})},
+                elements: Array.isArray(raw.elements) ? raw.elements : parent?.elements,
+                display: {...(parent?.display || {}), ...(raw.display || {})},
+                overrides: Array.isArray(raw.overrides) ? raw.overrides : (parent?.overrides || []),
+                guiLight: raw.gui_light || parent?.guiLight || "side"
+            };
+        }
+
+        function loadModel(resource) {
+            if (!modelCache.has(resource)) {
+                modelCache.set(resource, resolveModel(resource, new Set()));
+            }
+            return modelCache.get(resource);
+        }
+
+        async function resolveItemModel(item, context = {}) {
+            const id = splitId(item?.id);
+            if (!id) return null;
+            let model = await loadModel(`${id.namespace}:item/${id.path}`);
+            if (!model) return null;
+            let selected = null;
+            for (const override of model.overrides || []) {
+                if (override?.model && modelOverrideMatches(override.predicate, item, context)) {
+                    selected = normalizeResourceId(override.model, "minecraft");
+                }
+            }
+            if (selected) model = await loadModel(selected) || model;
+            return model;
+        }
+
+        function modelLayers(model) {
+            return Object.keys(model?.textures || {})
+                .map(key => /^layer(\d+)$/.exec(key))
+                .filter(Boolean)
+                .sort((left, right) => Number(left[1]) - Number(right[1]))
+                .map(match => resolveTextureReference(
+                    model.textures,
+                    `#${match[0]}`
+                ))
+                .filter(Boolean);
+        }
+
+        const ITEM_UNIT = 0.035;
+        const FACE_SHADE = {
+            up: 1,
+            down: 0.58,
+            north: 0.82,
+            south: 0.88,
+            west: 0.72,
+            east: 0.76
+        };
+
+        function itemTint(item, index) {
+            return item?.tints?.[index] || (index === 0 ? item?.color : null);
+        }
+
+        function itemBuild(item) {
+            return {
+                item,
+                root: new Three.Group(),
+                materials: [],
+                materialCache: new Map()
+            };
+        }
+
+        function itemMaterial(build, resource, tintIndex = -1, shade = 1) {
+            const tint = tintIndex >= 0 ? itemTint(build.item, tintIndex) : null;
+            const key = `${resource || "missing"}|${tint || ""}|${shade}`;
+            if (!build.materialCache.has(key)) {
+                build.materialCache.set(key, (async () => {
+                    const color = tint
+                        ? new Three.Color(tint)
+                        : (resource ? new Three.Color(0xffffff) : itemColor(build.item));
+                    color.multiplyScalar(shade);
+                    const value = material(color);
+                    value.side = Three.DoubleSide;
+                    value.transparent = true;
+                    const [texture, metadata] = await Promise.all([
+                        getTexture(resource ? [resource] : []),
+                        loadTextureMetadata(resource)
+                    ]);
+                    if (texture) {
+                        const map = configureTexture(texture.clone());
+                        const width = map.image?.naturalWidth || map.image?.width || 0;
+                        const height = map.image?.naturalHeight || map.image?.height || 0;
+                        const frame = firstAnimationFrame(metadata, width, height);
+                        if (frame) {
+                            map.repeat.set(frame.repeatX, frame.repeatY);
+                            map.offset.set(frame.offsetX, frame.offsetY);
+                        } else if (width > 0 && height > width && height % width === 0) {
+                            map.repeat.y = width / height;
+                            map.offset.y = 1 - map.repeat.y;
+                        }
+                        map.userData = {...(map.userData || {}), bpmOwned: true};
+                        value.map = map;
+                        value.needsUpdate = true;
+                    }
+                    build.materials.push(value);
+                    return value;
+                })());
+            }
+            return build.materialCache.get(key);
+        }
+
+        function setPlaneUv(geometry, uv, rotation = 0) {
+            const [left, top, right, bottom] = uv.map(Number);
+            const corners = [
+                [left / 16, 1 - top / 16],
+                [right / 16, 1 - top / 16],
+                [left / 16, 1 - bottom / 16],
+                [right / 16, 1 - bottom / 16]
+            ];
+            const orders = {
+                0: [0, 1, 2, 3],
+                90: [2, 0, 3, 1],
+                180: [3, 2, 1, 0],
+                270: [1, 3, 0, 2]
+            };
+            const order = orders[((Number(rotation) % 360) + 360) % 360] || orders[0];
+            const attribute = geometry.attributes.uv;
+            order.forEach((corner, index) => attribute.setXY(index, ...corners[corner]));
+            attribute.needsUpdate = true;
+        }
+
+        function itemFace(from, to, origin, direction) {
+            const middle = from.map((value, index) => (value + to[index]) / 2);
+            switch (direction) {
+                case "east": return {
+                    width: to[2] - from[2], height: to[1] - from[1],
+                    position: [to[0], middle[1], middle[2]], rotation: [0, Math.PI / 2, 0]
+                };
+                case "west": return {
+                    width: to[2] - from[2], height: to[1] - from[1],
+                    position: [from[0], middle[1], middle[2]], rotation: [0, -Math.PI / 2, 0]
+                };
+                case "up": return {
+                    width: to[0] - from[0], height: to[2] - from[2],
+                    position: [middle[0], to[1], middle[2]], rotation: [-Math.PI / 2, 0, 0]
+                };
+                case "down": return {
+                    width: to[0] - from[0], height: to[2] - from[2],
+                    position: [middle[0], from[1], middle[2]], rotation: [Math.PI / 2, 0, 0]
+                };
+                case "north": return {
+                    width: to[0] - from[0], height: to[1] - from[1],
+                    position: [middle[0], middle[1], from[2]], rotation: [0, Math.PI, 0]
+                };
+                default: return {
+                    width: to[0] - from[0], height: to[1] - from[1],
+                    position: [middle[0], middle[1], to[2]], rotation: [0, 0, 0]
+                };
+            }
+        }
+
+        async function addElementModel(build, model) {
+            for (const element of model.elements || []) {
+                const from = Array.isArray(element?.from) ? element.from.map(Number) : null;
+                const to = Array.isArray(element?.to) ? element.to.map(Number) : null;
+                if (!from || !to || from.length !== 3 || to.length !== 3) continue;
+                const rotation = element.rotation;
+                const origin = Array.isArray(rotation?.origin) ? rotation.origin.map(Number) : [8, 8, 8];
+                const pivot = new Three.Group();
+                pivot.position.set(...origin.map(value => (value - 8) * ITEM_UNIT));
+                for (const [direction, face] of Object.entries(element.faces || {})) {
+                    if (!face?.texture) continue;
+                    const descriptor = itemFace(from, to, origin, direction);
+                    if (descriptor.width <= 0 || descriptor.height <= 0) continue;
+                    const resource = resolveTextureReference(
+                        model.textures,
+                        face.texture
+                    );
+                    const value = await itemMaterial(
+                        build,
+                        resource,
+                        Number.isInteger(face.tintindex) ? face.tintindex : -1,
+                        element.shade === false ? 1 : (FACE_SHADE[direction] || 0.85)
+                    );
+                    const geometry = new Three.PlaneGeometry(
+                        descriptor.width * ITEM_UNIT,
+                        descriptor.height * ITEM_UNIT
+                    );
+                    setPlaneUv(
+                        geometry,
+                        Array.isArray(face.uv) ? face.uv : defaultFaceUv(from, to, direction),
+                        face.rotation
+                    );
+                    const mesh = new Three.Mesh(geometry, value);
+                    mesh.position.set(...descriptor.position.map(
+                        (position, index) => (position - origin[index]) * ITEM_UNIT
+                    ));
+                    mesh.rotation.set(...descriptor.rotation);
+                    pivot.add(mesh);
+                }
+                if (["x", "y", "z"].includes(rotation?.axis)
+                    && Number.isFinite(Number(rotation.angle))) {
+                    const angle = Three.MathUtils.degToRad(Number(rotation.angle));
+                    pivot.rotation[rotation.axis] = angle;
+                    if (rotation.rescale) {
+                        const scale = 1 / Math.max(0.01, Math.cos(angle));
+                        ["x", "y", "z"]
+                            .filter(axis => axis !== rotation.axis)
+                            .forEach(axis => {
+                                pivot.scale[axis] = scale;
+                            });
+                    }
+                }
+                if (pivot.children.length) build.root.add(pivot);
+            }
+        }
+
+        async function addGeneratedModel(build, model) {
+            const layers = modelLayers(model);
+            const alternatives = !layers.length;
+            const resources = alternatives ? itemTextureKeys(build.item) : layers;
+            let added = 0;
+            for (let index = 0; index < resources.length; index++) {
+                if (!await getTexture([resources[index]])) continue;
+                const value = await itemMaterial(build, resources[index], index, 1);
+                const mesh = new Three.Mesh(new Three.PlaneGeometry(0.56, 0.56), value);
+                mesh.position.z = added++ * 0.002;
+                build.root.add(mesh);
+                if (alternatives) break;
+            }
+            if (!added) {
+                const value = await itemMaterial(build, null, 0, 1);
+                build.root.add(new Three.Mesh(new Three.PlaneGeometry(0.56, 0.56), value));
+            }
+        }
+
+        function applyItemDisplay(root, model, context) {
+            const fallbackContext = context === "thirdperson_lefthand"
+                ? "thirdperson_righthand"
+                : context;
+            const display = model?.display?.[context] || model?.display?.[fallbackContext];
+            if (!display) return;
+            const rotation = Array.isArray(display.rotation) ? display.rotation : [0, 0, 0];
+            const translation = Array.isArray(display.translation) ? display.translation : [0, 0, 0];
+            const scale = Array.isArray(display.scale) ? display.scale : [1, 1, 1];
+            root.rotation.set(...rotation.map(Three.MathUtils.degToRad));
+            root.position.set(...translation.map(value => Number(value) * ITEM_UNIT));
+            root.scale.set(...scale.map(Number));
+        }
+
+        async function buildItemObject(item, context = "gui") {
+            const model = await resolveItemModel(item, {left: context.includes("left")});
+            const build = itemBuild(item);
+            if (Array.isArray(model?.elements) && model.elements.length) {
+                await addElementModel(build, model);
+            }
+            if (!build.root.children.length) {
+                await addGeneratedModel(build, model || {
+                    namespace: splitId(item?.id)?.namespace || "minecraft",
+                    textures: {}
+                });
+            }
+            applyItemDisplay(build.root, model, context);
+            return build;
+        }
+
+        function disposeItemObject(build) {
+            build?.root?.traverse(object => object.geometry?.dispose());
+            build?.materials?.forEach(value => {
+                if (value.map?.userData?.bpmOwned) value.map.dispose();
+                value.dispose();
+            });
+        }
+
+        function renderItemIcon(build) {
+            if (!build?.root?.children.length || !Three.WebGLRenderer) return null;
+            if (!iconRenderer) {
+                iconRenderer = new Three.WebGLRenderer({
+                    alpha: true,
+                    antialias: false,
+                    preserveDrawingBuffer: true
+                });
+                iconRenderer.setPixelRatio(1);
+                iconRenderer.setSize(64, 64, false);
+                iconRenderer.setClearColor(0x000000, 0);
+                if (Three.SRGBColorSpace) iconRenderer.outputColorSpace = Three.SRGBColorSpace;
+                else if (Three.sRGBEncoding) iconRenderer.outputEncoding = Three.sRGBEncoding;
+            }
+            const scene = new Three.Scene();
+            const camera = new Three.OrthographicCamera(-0.42, 0.42, 0.42, -0.42, 0.01, 10);
+            const box = new Three.Box3().setFromObject(build.root);
+            if (box.isEmpty()) return null;
+            const center = box.getCenter(new Three.Vector3());
+            const size = box.getSize(new Three.Vector3());
+            const fit = 0.68 / Math.max(size.x, size.y, size.z, 0.01);
+            build.root.position.sub(center);
+            build.root.scale.multiplyScalar(fit);
+            camera.position.set(0, 0, 3);
+            scene.add(build.root);
+            iconRenderer.render(scene, camera);
+            scene.remove(build.root);
+            return iconRenderer.domElement.toDataURL("image/png");
+        }
+
+        function itemIcon(item) {
+            const key = itemVisualKey(item);
+            if (!item || !key) return Promise.resolve(null);
+            if (!itemIconCache.has(key)) {
+                if (itemIconCache.size >= 512) {
+                    itemIconCache.delete(itemIconCache.keys().next().value);
+                }
+                itemIconCache.set(key, resourceReady.then(async () => {
+                    let build = null;
+                    try {
+                        build = await buildItemObject(item, "gui");
+                        return renderItemIcon(build)
+                            || itemTextureKeys(item).map(textureUrl).find(Boolean)
+                            || null;
+                    } catch (error) {
+                        console.debug(`Failed to render item icon ${item.id}`, error);
+                        return itemTextureKeys(item).map(textureUrl).find(Boolean) || null;
+                    } finally {
+                        disposeItemObject(build);
+                    }
+                }));
+            }
+            return itemIconCache.get(key);
         }
 
         function cuboidGeometry(width, height, depth, uv, textureHeight = 64) {
@@ -494,22 +1063,67 @@
             return path ? new URL(path, document.baseURI).href : null;
         }
 
-        function createOfflineLabel(data) {
+        function createPlayerLabel(data) {
             const element = document.createElement("button");
-            const image = document.createElement("img");
+            const head = document.createElement("img");
             const text = document.createElement("span");
+            const held = document.createElement("img");
             element.type = "button";
-            element.className = "bpm-offline-label";
-            image.alt = "";
-            image.draggable = false;
-            image.src = currentAssetUrl(`playerheads/${data.uuid}.png`)
+            element.className = "bpm-player-label";
+            head.className = "bpm-player-head";
+            head.alt = "";
+            head.draggable = false;
+            head.src = currentAssetUrl(`playerheads/${data.uuid}.png`)
                 || new URL("assets/steve.png", document.baseURI).href;
-            image.addEventListener("error", () => {
-                image.src = new URL("assets/steve.png", document.baseURI).href;
+            head.addEventListener("error", () => {
+                head.src = new URL("assets/steve.png", document.baseURI).href;
             }, {once: true});
             text.textContent = data.name;
-            element.append(image, text);
+            held.className = "bpm-player-held";
+            held.alt = "";
+            held.draggable = false;
+            held.hidden = true;
+            held.addEventListener("error", () => {
+                held.hidden = true;
+            });
+            element.append(head, text, held);
             return element;
+        }
+
+        function skinHeadIcon(image) {
+            const width = image?.naturalWidth || image?.width || 0;
+            const height = image?.naturalHeight || image?.height || 0;
+            if (!width || !height) return null;
+            const unit = width / 64;
+            const canvas = document.createElement("canvas");
+            const context = canvas.getContext("2d");
+            if (!context) return null;
+            canvas.width = 32;
+            canvas.height = 32;
+            context.imageSmoothingEnabled = false;
+            context.drawImage(image, 8 * unit, 8 * unit, 8 * unit, 8 * unit, 0, 0, 32, 32);
+            if (height >= 64 * unit) {
+                context.drawImage(image, 40 * unit, 8 * unit, 8 * unit, 8 * unit, 0, 0, 32, 32);
+            }
+            return canvas.toDataURL("image/png");
+        }
+
+        function updatePlayerLabel(actor) {
+            actor.label.querySelector("span").textContent = actor.data.name;
+            actor.label.classList.toggle("bpm-offline", !actor.data.online);
+            actor.label.classList.toggle("bpm-hidden-label", !settings.labels);
+            const item = actor.data.mainHand || actor.data.offHand;
+            const key = itemVisualKey(item);
+            if (actor.labelHeld.dataset.itemKey === key) return;
+            actor.labelHeld.dataset.itemKey = key;
+            actor.labelHeld.hidden = true;
+            actor.labelHeld.removeAttribute("src");
+            if (!item) return;
+            itemIcon(item).then(source => {
+                if (!source || actor.removed || actor.labelHeld.dataset.itemKey !== key) return;
+                actor.labelHeld.hidden = false;
+                actor.labelHeld.src = source;
+            });
         }
 
         function createCss2DObject(element) {
@@ -576,11 +1190,12 @@
                 actor, 4, 12, 4, [16, 48], [0, 48], [2 * PIXEL, 0.675, 0]
             );
 
-            actor.label = createOfflineLabel(data);
-            actor.label.addEventListener("click", () => showPlayerPopup(actor));
+            actor.label = createPlayerLabel(data);
+            actor.labelHead = actor.label.querySelector(".bpm-player-head");
+            actor.labelHeld = actor.label.querySelector(".bpm-player-held");
             actor.labelObject = createCss2DObject(actor.label);
             actor.labelObject.position.set(0, 2.05, 0);
-            actor.offlineAnchor.add(actor.labelObject);
+            actor.model.add(actor.labelObject);
             actor.offlineAnchor.position.copy(actor.target);
             actor.offlineAnchor.add(actor.model);
             actorScene.add(actor.offlineAnchor);
@@ -605,7 +1220,14 @@
             actor.overlayMaterial.userData.baseColor = 0xffffff;
             actor.baseMaterial.needsUpdate = true;
             actor.overlayMaterial.needsUpdate = true;
-            actor.overlayMeshes.forEach(mesh => mesh.visible = texture.image?.height === 64);
+            actor.overlayMeshes.forEach(mesh => {
+                mesh.visible = texture.image?.height === texture.image?.width;
+            });
+            try {
+                actor.labelHead.src = skinHeadIcon(texture.image) || actor.labelHead.src;
+            } catch {
+                // Keep the server-published head if the browser disallows canvas extraction.
+            }
             actor.skinReady = true;
             updateTone(actor);
             applyPlayerVisibility(actor);
@@ -655,13 +1277,13 @@
             actor.target.set(data.x, data.y, data.z);
             actor.targetYaw = -Three.MathUtils.degToRad(data.yaw || 0);
             if (data.online || wasOnline) actor.offlineAnchor.position.copy(actor.target);
-            actor.label.querySelector("span").textContent = data.name;
-            actor.label.classList.toggle("bpm-hidden-label", !settings.labels);
+            updatePlayerLabel(actor);
 
             const equipmentKey = JSON.stringify([
-                data.mainHand?.id,
-                data.offHand?.id,
-                ...(data.armor || []).flatMap(item => [item?.id, item?.color])
+                !!data.leftHanded,
+                itemVisualKey(data.mainHand),
+                itemVisualKey(data.offHand),
+                ...(data.armor || []).map(itemVisualKey)
             ]);
             if (actor.equipmentKey !== equipmentKey) {
                 actor.equipmentKey = equipmentKey;
@@ -673,11 +1295,14 @@
         }
 
         function clearEquipment(actor) {
-            actor.equipmentMeshes.forEach(mesh => {
-                mesh.parent?.remove(mesh);
-                mesh.geometry.dispose();
+            actor.equipmentMeshes.forEach(object => {
+                object.parent?.remove(object);
+                object.traverse(child => child.geometry?.dispose());
             });
-            actor.equipmentMaterials.forEach(value => value.dispose());
+            actor.equipmentMaterials.forEach(value => {
+                if (value.map?.userData?.bpmOwned) value.map.dispose();
+                value.dispose();
+            });
             actor.equipmentMeshes = [];
             actor.equipmentMaterials = [];
             actor.armorMeshes = [];
@@ -705,65 +1330,94 @@
 
         function addArmorLayer(actor, item, layer, parts) {
             const value = trackedEquipmentMaterial(actor, item);
-            const resource = armorTextureKey(item.id, layer);
+            const resource = item.armorTexture || armorTextureKey(item.id, layer);
             const key = actor.equipmentKey;
-            parts(value);
-            getTexture([resource]).then(texture => {
-                if (!texture || actor.removed || key !== actor.equipmentKey) return;
-                value.map = texture;
-                value.userData.baseColor = item.color ? new Three.Color(item.color).getHex() : 0xffffff;
-                value.needsUpdate = true;
-                updateTone(actor);
-                app.mapViewer.redraw();
-            });
+            const load = (target, textureResource, baseColor = 0xffffff) =>
+                getTexture([textureResource]).then(texture => {
+                    if (!texture || actor.removed || key !== actor.equipmentKey) return;
+                    target.map = texture;
+                    target.userData.baseColor = baseColor;
+                    target.needsUpdate = true;
+                    updateTone(actor);
+                    app.mapViewer.redraw();
+                });
+            parts(value, 0);
+            load(
+                value,
+                resource,
+                item.color ? new Three.Color(item.color).getHex() : 0xffffff
+            );
+            if (item.armorOverlayTexture) {
+                const overlay = material(0xffffff);
+                overlay.transparent = true;
+                actor.equipmentMaterials.push(overlay);
+                parts(overlay, 0.008);
+                load(overlay, item.armorOverlayTexture);
+            }
+            if (item.trimTexture) {
+                const trim = material(0xffffff);
+                trim.transparent = true;
+                actor.equipmentMaterials.push(trim);
+                parts(trim, 0.015);
+                load(trim, item.trimTexture);
+            }
         }
 
         function addHeldItem(actor, arm, item, left) {
-            const value = trackedEquipmentMaterial(actor, item);
-            value.side = Three.DoubleSide;
-            const mesh = new Three.Mesh(new Three.PlaneGeometry(0.45, 0.45), value);
-            mesh.position.set(left ? -0.08 : 0.08, -0.58, -0.1);
-            mesh.rotation.set(-0.25, left ? -0.25 : 0.25, left ? 0.22 : -0.22);
-            arm.add(mesh);
-            actor.equipmentMeshes.push(mesh);
-            actor.heldMeshes.push(mesh);
+            const holder = new Three.Group();
+            holder.position.set(left ? -0.08 : 0.08, -0.58, -0.1);
+            holder.rotation.set(-0.25, left ? -0.25 : 0.25, left ? 0.22 : -0.22);
+            arm.add(holder);
+            actor.equipmentMeshes.push(holder);
+            actor.heldMeshes.push(holder);
             const key = actor.equipmentKey;
-            getTexture(itemTextureKeys(item)).then(texture => {
-                if (!texture || actor.removed || key !== actor.equipmentKey) return;
-                value.map = texture;
-                value.userData.baseColor = 0xffffff;
-                value.needsUpdate = true;
-                updateTone(actor);
-                app.mapViewer.redraw();
-            });
+            resourceReady
+                .then(() => buildItemObject(
+                    item,
+                    left ? "thirdperson_lefthand" : "thirdperson_righthand"
+                ))
+                .then(build => {
+                    if (actor.removed || key !== actor.equipmentKey) {
+                        disposeItemObject(build);
+                        return;
+                    }
+                    holder.add(build.root);
+                    actor.equipmentMaterials.push(...build.materials);
+                    updateTone(actor);
+                    applyPlayerVisibility(actor);
+                    app.mapViewer.redraw();
+                })
+                .catch(error => {
+                    console.debug(`Failed to render held item ${item.id}`, error);
+                });
         }
 
         function rebuildEquipment(actor) {
             clearEquipment(actor);
             const [head, chest, legs, feet] = actor.data.armor || [];
             if (head) {
-                addArmorLayer(actor, head, 1, value => {
-                    addArmorMesh(actor, actor.head, [8, 8, 8], [0, 0], [0, 0, 0], value, 1.14);
+                addArmorLayer(actor, head, 1, (value, grow) => {
+                    addArmorMesh(actor, actor.head, [8, 8, 8], [0, 0], [0, 0, 0], value, 1.14 + grow);
                 });
             }
             if (chest) {
-                addArmorLayer(actor, chest, 1, value => {
-                    addArmorMesh(actor, actor.body, [8, 12, 4], [16, 16], [0, 0, 0], value);
-                    addArmorMesh(actor, actor.rightArm, [4, 12, 4], [40, 16], [0, -6 * PIXEL, 0], value);
-                    addArmorMesh(actor, actor.leftArm, [4, 12, 4], [40, 16], [0, -6 * PIXEL, 0], value);
+                addArmorLayer(actor, chest, 1, (value, grow) => {
+                    addArmorMesh(actor, actor.body, [8, 12, 4], [16, 16], [0, 0, 0], value, 1.08 + grow);
+                    addArmorMesh(actor, actor.rightArm, [4, 12, 4], [40, 16], [0, -6 * PIXEL, 0], value, 1.08 + grow);
+                    addArmorMesh(actor, actor.leftArm, [4, 12, 4], [40, 16], [0, -6 * PIXEL, 0], value, 1.08 + grow);
                 });
             }
             if (legs) {
-                addArmorLayer(actor, legs, 2, value => {
-                    addArmorMesh(actor, actor.body, [8, 12, 4], [16, 16], [0, 0, 0], value, 1.04);
-                    addArmorMesh(actor, actor.rightLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value);
-                    addArmorMesh(actor, actor.leftLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value);
+                addArmorLayer(actor, legs, 2, (value, grow) => {
+                    addArmorMesh(actor, actor.body, [8, 12, 4], [16, 16], [0, 0, 0], value, 1.04 + grow);
+                    addArmorMesh(actor, actor.rightLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value, 1.08 + grow);
+                    addArmorMesh(actor, actor.leftLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value, 1.08 + grow);
                 });
             }
             if (feet) {
-                addArmorLayer(actor, feet, 1, value => {
-                    addArmorMesh(actor, actor.rightLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value, 1.1);
-                    addArmorMesh(actor, actor.leftLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value, 1.1);
+                addArmorLayer(actor, feet, 1, (value, grow) => {
+                    addArmorMesh(actor, actor.rightLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value, 1.1 + grow);
+                    addArmorMesh(actor, actor.leftLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value, 1.1 + grow);
                 });
             }
 
@@ -822,12 +1476,12 @@
             actor.removed = true;
             clearNativeMarker(actor);
             actor.model.parent?.remove(actor.model);
-            actor.offlineAnchor.remove(actor.labelObject);
+            actor.labelObject.parent?.remove(actor.labelObject);
             actorScene.remove(actor.offlineAnchor);
+            clearEquipment(actor);
             actor.model.traverse(object => object.geometry?.dispose());
             actor.baseMaterial.dispose();
             actor.overlayMaterial.dispose();
-            actor.equipmentMaterials.forEach(value => value.dispose());
             actor.label.remove();
         }
 
@@ -1081,21 +1735,32 @@
                 ? "Live snapshot"
                 : `Logout snapshot - ${formatLastSeen(data.lastSeen)}`;
             const equipment = ui.querySelector("#bpm-equipment-grid");
-            equipment.replaceChildren();
-            [
-                ["Head", data.armor?.[0]], ["Chest", data.armor?.[1]],
-                ["Legs", data.armor?.[2]], ["Feet", data.armor?.[3]],
-                ["Main hand", data.mainHand], ["Off hand", data.offHand]
-            ].forEach(([name, item]) => equipment.append(inventorySlot(item, name)));
+            syncSlotNodes(equipment, [
+                ["head", "Head", data.armor?.[0]], ["chest", "Chest", data.armor?.[1]],
+                ["legs", "Legs", data.armor?.[2]], ["feet", "Feet", data.armor?.[3]],
+                ["main", "Main hand", data.mainHand], ["off", "Off hand", data.offHand]
+            ].map(([slot, name, item]) => ({
+                slot: `equipment:${slot}`,
+                name,
+                item,
+                update: element => updateInventorySlot(element, item, name)
+            })), descriptor => inventorySlot(descriptor.item, descriptor.name));
 
             const inventory = ui.querySelector("#bpm-inventory-grid");
-            inventory.replaceChildren();
-            inventoryOrder(data.inventory || []).forEach(({item, index}) => {
-                const element = inventorySlot(item, `Slot ${index + 1}`);
-                element.classList.toggle("bpm-hotbar", index < 9);
-                element.classList.toggle("bpm-active-slot", index === data.selectedSlot);
-                inventory.append(element);
-            });
+            syncSlotNodes(
+                inventory,
+                inventoryOrder(data.inventory || []).map(({item, index}) => ({
+                    slot: `inventory:${index}`,
+                    name: `Slot ${index + 1}`,
+                    item,
+                    update: element => {
+                        updateInventorySlot(element, item, `Slot ${index + 1}`);
+                        element.classList.toggle("bpm-hotbar", index < 9);
+                        element.classList.toggle("bpm-active-slot", index === data.selectedSlot);
+                    }
+                })),
+                descriptor => inventorySlot(descriptor.item, descriptor.name)
+            );
         }
 
         function iconSources(item) {
@@ -1127,28 +1792,40 @@
             image.className = "bpm-item-image";
             image.alt = "";
             image.draggable = false;
-            const sources = iconSources(item);
-            let sourceIndex = 0;
             image.addEventListener("load", () => element.classList.add("bpm-has-image"));
-            image.addEventListener("error", () => {
-                if (sourceIndex < sources.length) image.src = sources[sourceIndex++];
-                else image.remove();
+            itemIcon(item).then(rendered => {
+                const sources = [...new Set([rendered, ...iconSources(item)].filter(Boolean))];
+                let sourceIndex = 0;
+                const next = () => {
+                    if (sourceIndex < sources.length) image.src = sources[sourceIndex++];
+                    else image.remove();
+                };
+                image.addEventListener("error", next);
+                next();
             });
-            if (sources.length) image.src = sources[sourceIndex++];
-            else image.remove();
 
             const count = document.createElement("span");
             count.className = "bpm-item-count";
-            count.textContent = item.count > 1 ? String(item.count) : "";
             element.append(fallback, image, count);
             if (item.maxDamage > 0) {
                 const durability = document.createElement("span");
                 durability.className = "bpm-durability";
+                element.append(durability);
+            }
+            updateInventorySlot(element, item, slotName);
+            return element;
+        }
+
+        function updateInventorySlot(element, item, slotName) {
+            if (!item) return;
+            const count = element.querySelector(".bpm-item-count");
+            if (count) count.textContent = item.count > 1 ? String(item.count) : "";
+            const durability = element.querySelector(".bpm-durability");
+            if (durability) {
                 durability.style.setProperty(
                     "--bpm-durability",
                     `${Math.max(0, 1 - item.damage / item.maxDamage) * 100}%`
                 );
-                element.append(durability);
             }
             const durabilityText = item.maxDamage
                 ? `\nDurability: ${item.maxDamage - item.damage}/${item.maxDamage}`
@@ -1159,7 +1836,6 @@
                 `${slotName}: ${item.name}, ${item.count}${durabilityText.replace("\n", ", ")}`
             );
             element.classList.toggle("bpm-glint", item.glint);
-            return element;
         }
 
         function reconcile(payload, update) {
@@ -1276,6 +1952,7 @@
             textureCache.forEach(promise => promise.then(texture => texture?.dispose()));
             textureCache.clear();
             gallery.clear();
+            itemIconCache.clear();
         }
 
         function resetForMap() {
@@ -1297,8 +1974,8 @@
             updateCounts();
             setStatus("waiting", "Waiting for map data");
             const token = generation;
-            loadTextureGallery(app.mapViewer.map, token).then(() => {
-                if (token === generation) refresh(true);
+            Promise.all([resourceReady, loadTextureGallery(app.mapViewer.map, token)]).then(() => {
+                if (token === generation) app.mapViewer.redraw();
             });
             refresh(true);
         }
