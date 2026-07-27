@@ -1,22 +1,25 @@
 # BlueMap Player Models
 
-A server-side Forge 1.20.1 add-on for BlueMap 5.12 that replaces the map's
-floating player heads with animated 3D player models.
+A server-side Forge 1.20.1 add-on for BlueMap 5.12 that adds animated player
+models and loaded entities to the map.
 
 ## Features
 
-- Skin-textured 3D player models at live map positions
-- Walking limb animation and smooth movement
-- Visible armor, main-hand, and off-hand equipment
-- Click a model to open its selected-player card and inventory
-- Gray offline models at saved logout positions
+- Skin-textured 3D player models attached to BlueMap's live player markers
+- Walking animation, head pitch, and BlueMap's smooth position updates
+- Armor textures plus main-hand and off-hand item sprites
+- Click a player for Inventory, Center, and Follow actions
+- Gray offline players at their saved logout positions
 - Logout snapshots persisted in the world's `data` folder
-- Responsive, keyboard-friendly inventory dialog
+- Up to 128 loaded non-player entities per mapped world, with vanilla textures
+  and simple 3D model families
+- BlueMap-styled, responsive settings and inventory side panels
 
-Armor uses colored 3D shells and held items use colored silhouettes. This keeps
-the add-on server-only and avoids bundling Minecraft's client item-model and
-resource-pack pipeline. Item names, counts, durability, and exact registry IDs
-remain available in the inventory tooltip.
+The add-on reuses BlueMap's texture gallery when possible and exposes vanilla
+entity, armor, item, and block textures from the Minecraft client jar already
+downloaded by BlueMap. Missing or modded models use a simple fallback; arbitrary
+client-only entity renderers and item models are not available on a dedicated
+server.
 
 ## Requirements
 
@@ -31,21 +34,23 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.0.1.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.1.0.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 
 The jar is safe if a modpack synchronizer also copies it to clients: its
 BlueMap integration is initialized only on a dedicated server.
 
-The add-on copies and registers its JavaScript/CSS through BlueMapAPI. Players
-appear after BlueMap has loaded a map and the player has joined once. Skin files
-are fetched from Mojang's texture server and cached in BlueMap's webroot.
+The add-on copies and registers versioned JavaScript/CSS through BlueMapAPI.
+Players appear after BlueMap has loaded a map and the player has joined once.
+Skins are obtained through BlueMap's configured skin provider and cached in its
+webroot.
 
 ## Privacy
 
-The inventory dialog is visible to anyone who can access the BlueMap webapp.
-Do not deploy it on a public map unless publishing player inventories is
+Complete inventories are included in the map's JSON asset so the browser can
+render them; they are not access-controlled separately from BlueMap. Do not
+deploy this add-on on a public map unless publishing player inventories is
 intentional.
 
 ## Checks

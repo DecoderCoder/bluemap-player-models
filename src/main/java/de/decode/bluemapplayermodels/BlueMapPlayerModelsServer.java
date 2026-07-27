@@ -10,7 +10,9 @@ import de.bluecolored.bluemap.api.AssetStorage;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.HumanoidArm;
 import net.minecraft.world.item.DyeableLeatherItem;
@@ -25,45 +27,63 @@ import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.registries.ForgeRegistries;
 import org.slf4j.Logger;
 
+import javax.imageio.ImageIO;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 final class BlueMapPlayerModelsServer {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
-    private static final HttpClient HTTP = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(10))
-        .followRedirects(HttpClient.Redirect.NORMAL)
-        .build();
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
-    private static final byte[] PNG_HEADER = {(byte) 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
+    private static final String WEB_ASSET_VERSION = "1.1.0";
+    private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
+    private static final int ENTITY_LIMIT = 128;
+    private static final long SKIN_RETRY_DELAY_MS = 60_000;
+    private static final long SKIN_REFRESH_MS = 24 * 60 * 60 * 1_000L;
+    private static final Pattern DATA_PATH = Pattern.compile(
+        "^\\s*data\\s*:\\s*(?:\"([^\"]+)\"|'([^']+)'|([^\\s#]+))\\s*(?:#.*)?$"
+    );
+    private static final List<String> TEXTURE_PREFIXES = List.of(
+        "assets/minecraft/textures/entity/",
+        "assets/minecraft/textures/models/armor/",
+        "assets/minecraft/textures/item/",
+        "assets/minecraft/textures/block/"
+    );
 
     private final Map<UUID, PlayerData> players = new ConcurrentHashMap<>();
     private final AtomicBoolean publishing = new AtomicBoolean();
-    private final java.util.Set<UUID> downloadingSkins = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> requestedSkins = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, Long> skinRetryAt = new ConcurrentHashMap<>();
+    private final ExecutorService skinExecutor = daemonExecutor("bluemap-player-models-skin", 2);
+    private final ExecutorService publicationExecutor = daemonExecutor("bluemap-player-models-publish", 1);
 
     private volatile BlueMapAPI blueMap;
+    private volatile Map<String, List<EntityData>> entitiesByWorld = Map.of();
     private volatile Path skinRoot;
     private MinecraftServer server;
     private Path stateFile;
@@ -75,6 +95,7 @@ final class BlueMapPlayerModelsServer {
         BlueMapAPI.onDisable(api -> {
             if (blueMap == api) {
                 blueMap = null;
+                entitiesByWorld = Map.of();
                 skinRoot = null;
             }
         });
@@ -88,6 +109,7 @@ final class BlueMapPlayerModelsServer {
             .resolve(ASSET_ROOT + ".json");
         loadState();
         updateOnlinePlayers();
+        updateEntities();
         publish();
     }
 
@@ -95,7 +117,10 @@ final class BlueMapPlayerModelsServer {
     public void onServerStopping(ServerStoppingEvent event) {
         event.getServer().getPlayerList().getPlayers().forEach(player -> snapshot(player, false));
         saveState();
+        entitiesByWorld = Map.of();
         server = null;
+        skinExecutor.shutdownNow();
+        publicationExecutor.shutdown();
     }
 
     @SubscribeEvent
@@ -121,20 +146,26 @@ final class BlueMapPlayerModelsServer {
         }
 
         updateOnlinePlayers();
+        updateEntities();
         publish();
     }
 
     private void enableBlueMap(BlueMapAPI api) {
         try {
             Path root = api.getWebApp().getWebRoot();
-            copyResource("/web/player-models.js", root.resolve(ASSET_ROOT).resolve("player-models.js"));
-            copyResource("/web/player-models.css", root.resolve(ASSET_ROOT).resolve("player-models.css"));
-            api.getWebApp().registerScript(ASSET_ROOT + "/player-models.js");
-            api.getWebApp().registerStyle(ASSET_ROOT + "/player-models.css");
+            String script = "player-models-" + WEB_ASSET_VERSION + ".js";
+            String style = "player-models-" + WEB_ASSET_VERSION + ".css";
+            copyResource("/web/player-models.js", root.resolve(ASSET_ROOT).resolve(script));
+            copyResource("/web/player-models.css", root.resolve(ASSET_ROOT).resolve(style));
+            exportMinecraftTextures(root.resolve(ASSET_ROOT).resolve("minecraft"));
+            api.getWebApp().registerScript(ASSET_ROOT + "/" + script);
+            api.getWebApp().registerStyle(ASSET_ROOT + "/" + style);
             skinRoot = Files.createDirectories(root.resolve(ASSET_ROOT).resolve("skins"));
+            requestedSkins.clear();
+            skinRetryAt.clear();
             blueMap = api;
             publish();
-            LOGGER.info("BlueMap Player Models web assets installed");
+            LOGGER.info("BlueMap Player Models {} web assets installed", WEB_ASSET_VERSION);
         } catch (IOException exception) {
             LOGGER.error("Failed to install BlueMap Player Models web assets", exception);
         }
@@ -156,6 +187,68 @@ final class BlueMapPlayerModelsServer {
         }
     }
 
+    private void updateEntities() {
+        MinecraftServer currentServer = server;
+        BlueMapAPI api = blueMap;
+        if (currentServer == null || api == null) {
+            entitiesByWorld = Map.of();
+            return;
+        }
+
+        Set<String> mappedWorlds = api.getMaps().stream()
+            .map(map -> map.getWorld().getId())
+            .collect(java.util.stream.Collectors.toSet());
+        Map<String, List<EntityData>> snapshot = new HashMap<>();
+        for (ServerLevel level : currentServer.getAllLevels()) {
+            String worldId = api.getWorld(level)
+                .map(world -> world.getId())
+                .orElse(null);
+            if (worldId == null || !mappedWorlds.contains(worldId)) {
+                continue;
+            }
+
+            List<EntityData> entities = new ArrayList<>();
+            for (Entity entity : level.getAllEntities()) {
+                if (entities.size() >= ENTITY_LIMIT) {
+                    break;
+                }
+                if (entity instanceof ServerPlayer || entity.isRemoved() || !entity.isAlive()) {
+                    continue;
+                }
+
+                EntityData data = entity(entity);
+                if (data != null) {
+                    entities.add(data);
+                }
+            }
+            snapshot.put(worldId, List.copyOf(entities));
+        }
+        entitiesByWorld = Map.copyOf(snapshot);
+    }
+
+    private static EntityData entity(Entity entity) {
+        var type = ForgeRegistries.ENTITY_TYPES.getKey(entity.getType());
+        if (type == null) {
+            return null;
+        }
+
+        EntityData data = new EntityData();
+        data.uuid = entity.getStringUUID();
+        data.type = type.toString();
+        data.name = entity.getDisplayName().getString();
+        data.customName = entity.hasCustomName() && entity.getCustomName() != null
+            ? entity.getCustomName().getString()
+            : null;
+        data.x = entity.getX();
+        data.y = entity.getY();
+        data.z = entity.getZ();
+        data.yaw = entity.getYRot();
+        data.pitch = entity.getXRot();
+        data.width = entity.getBbWidth();
+        data.height = entity.getBbHeight();
+        return data;
+    }
+
     private void snapshot(ServerPlayer player, boolean online) {
         PlayerData previous = players.get(player.getUUID());
         PlayerData data = new PlayerData();
@@ -174,12 +267,9 @@ final class BlueMapPlayerModelsServer {
         data.selectedSlot = player.getInventory().selected;
         data.worldId = worldId(player, previous);
 
-        SkinInfo skin = skinInfo(player);
-        data.slim = skin.slim;
+        data.slim = hasSlimSkin(player);
         data.skin = ASSET_ROOT + "/skins/" + data.uuid + ".png";
-        if (skin.url != null) {
-            downloadSkin(player.getUUID(), skin.url);
-        }
+        cacheSkin(player.getUUID());
 
         data.mainHand = item(player.getMainHandItem());
         data.offHand = item(player.getOffhandItem());
@@ -222,12 +312,12 @@ final class BlueMapPlayerModelsServer {
         return item;
     }
 
-    private static SkinInfo skinInfo(ServerPlayer player) {
+    private static boolean hasSlimSkin(ServerPlayer player) {
         Property property = player.getGameProfile().getProperties().get("textures").stream()
             .findFirst()
             .orElse(null);
         if (property == null) {
-            return SkinInfo.EMPTY;
+            return false;
         }
 
         try {
@@ -235,76 +325,160 @@ final class BlueMapPlayerModelsServer {
             JsonObject skin = JsonParser.parseString(json).getAsJsonObject()
                 .getAsJsonObject("textures")
                 .getAsJsonObject("SKIN");
-            URI url = validatedSkinUri(skin.get("url").getAsString());
-            boolean slim = skin.has("metadata")
+            return skin.has("metadata")
                 && "slim".equals(skin.getAsJsonObject("metadata").get("model").getAsString());
-            return new SkinInfo(url, slim);
         } catch (RuntimeException exception) {
             LOGGER.debug("Invalid skin metadata for {}", player.getGameProfile().getName(), exception);
-            return SkinInfo.EMPTY;
+            return false;
         }
     }
 
-    private static URI validatedSkinUri(String value) {
-        URI uri = URI.create(value);
-        if (!"textures.minecraft.net".equalsIgnoreCase(uri.getHost())) {
-            throw new IllegalArgumentException("Unexpected skin host");
-        }
-        if ("http".equalsIgnoreCase(uri.getScheme())) {
-            return URI.create("https://" + uri.getHost() + uri.getRawPath());
-        }
-        if (!"https".equalsIgnoreCase(uri.getScheme())) {
-            throw new IllegalArgumentException("Unexpected skin protocol");
-        }
-        return uri;
-    }
-
-    private void downloadSkin(UUID uuid, URI uri) {
+    private void cacheSkin(UUID uuid) {
         Path root = skinRoot;
-        if (root == null) {
+        BlueMapAPI api = blueMap;
+        if (root == null || api == null) {
             return;
         }
 
         Path target = root.resolve(uuid + ".png");
-        if (Files.exists(target) || !downloadingSkins.add(uuid)) {
+        long now = System.currentTimeMillis();
+        if (isFreshSkin(target, now)
+            || skinRetryAt.getOrDefault(uuid, 0L) > now
+            || !requestedSkins.add(uuid)) {
             return;
         }
 
         CompletableFuture.runAsync(() -> {
+            Path temporary = target.resolveSibling(target.getFileName() + ".tmp");
             try {
-                HttpRequest request = HttpRequest.newBuilder(uri)
-                    .timeout(Duration.ofSeconds(15))
-                    .GET()
-                    .build();
-                HttpResponse<byte[]> response = HTTP.send(request, HttpResponse.BodyHandlers.ofByteArray());
-                byte[] png = response.body();
-                if (response.statusCode() != 200 || png.length > 2_000_000 || !hasPngHeader(png)) {
-                    throw new IOException("Invalid skin response: HTTP " + response.statusCode());
+                var skin = api.getPlugin().getSkinProvider().load(uuid);
+                if (skin.isEmpty()) {
+                    skinRetryAt.put(uuid, System.currentTimeMillis() + SKIN_RETRY_DELAY_MS);
+                    return;
                 }
-
-                Path temporary = target.resolveSibling(target.getFileName() + ".tmp");
-                Files.write(temporary, png);
+                Files.createDirectories(target.getParent());
+                if (!ImageIO.write(skin.get(), "png", temporary.toFile())) {
+                    throw new IOException("No PNG image writer is available");
+                }
                 replaceAtomically(temporary, target);
-            } catch (IOException exception) {
+                skinRetryAt.remove(uuid);
+            } catch (IOException | RuntimeException exception) {
+                skinRetryAt.put(uuid, System.currentTimeMillis() + SKIN_RETRY_DELAY_MS);
                 LOGGER.warn("Failed to cache skin for {}", uuid, exception);
-            } catch (InterruptedException exception) {
-                Thread.currentThread().interrupt();
             } finally {
-                downloadingSkins.remove(uuid);
+                requestedSkins.remove(uuid);
+                try {
+                    Files.deleteIfExists(temporary);
+                } catch (IOException exception) {
+                    LOGGER.debug("Failed to remove temporary skin {}", temporary, exception);
+                }
             }
-        });
+        }, skinExecutor);
     }
 
-    private static boolean hasPngHeader(byte[] bytes) {
-        if (bytes.length < PNG_HEADER.length) {
+    private static boolean isFreshSkin(Path target, long now) {
+        try {
+            return Files.isRegularFile(target)
+                && Files.size(target) > 0
+                && Files.getLastModifiedTime(target).toMillis() > now - SKIN_REFRESH_MS;
+        } catch (IOException exception) {
             return false;
         }
-        for (int i = 0; i < PNG_HEADER.length; i++) {
-            if (bytes[i] != PNG_HEADER[i]) {
-                return false;
+    }
+
+    private static void exportMinecraftTextures(Path targetRoot) {
+        Path minecraftClient = findMinecraftClient();
+        if (minecraftClient == null) {
+            LOGGER.warn(
+                "Could not find {}; entity and item textures will use browser fallbacks",
+                MINECRAFT_CLIENT
+            );
+            return;
+        }
+
+        Path safeRoot = targetRoot.toAbsolutePath().normalize();
+        int copied = 0;
+        try (ZipFile client = new ZipFile(minecraftClient.toFile())) {
+            var entries = client.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                String name = entry.getName();
+                if (entry.isDirectory()
+                    || !name.endsWith(".png")
+                    || TEXTURE_PREFIXES.stream().noneMatch(name::startsWith)) {
+                    continue;
+                }
+
+                Path target = safeRoot.resolve(name).normalize();
+                if (!target.startsWith(safeRoot)) {
+                    LOGGER.warn("Skipped unsafe path in {}: {}", minecraftClient, name);
+                    continue;
+                }
+                if (Files.isRegularFile(target)
+                    && entry.getSize() >= 0
+                    && Files.size(target) == entry.getSize()) {
+                    continue;
+                }
+
+                Files.createDirectories(target.getParent());
+                try (InputStream input = client.getInputStream(entry)) {
+                    Files.copy(input, target, StandardCopyOption.REPLACE_EXISTING);
+                }
+                copied++;
+            }
+            LOGGER.info(
+                "Exported {} vanilla texture(s) from {} to {}",
+                copied,
+                minecraftClient,
+                safeRoot
+            );
+        } catch (IOException exception) {
+            LOGGER.warn("Failed to export vanilla textures from {}", minecraftClient, exception);
+        }
+    }
+
+    private static Path findMinecraftClient() {
+        Path serverRoot = Path.of("").toAbsolutePath().normalize();
+        Path configuredData = configuredBlueMapData(serverRoot);
+        if (configuredData != null) {
+            Path configuredClient = configuredData.resolve(MINECRAFT_CLIENT);
+            if (Files.isRegularFile(configuredClient)) {
+                return configuredClient;
             }
         }
-        return true;
+
+        Path defaultClient = serverRoot.resolve("bluemap").resolve(MINECRAFT_CLIENT);
+        return Files.isRegularFile(defaultClient) ? defaultClient : null;
+    }
+
+    private static Path configuredBlueMapData(Path serverRoot) {
+        Path coreConfig = serverRoot.resolve("config").resolve("bluemap").resolve("core.conf");
+        if (!Files.isRegularFile(coreConfig)) {
+            return null;
+        }
+
+        try {
+            for (String line : Files.readAllLines(coreConfig, StandardCharsets.UTF_8)) {
+                Matcher matcher = DATA_PATH.matcher(line);
+                if (!matcher.matches()) {
+                    continue;
+                }
+
+                String value = matcher.group(1) != null
+                    ? matcher.group(1)
+                    : matcher.group(2) != null ? matcher.group(2) : matcher.group(3);
+                if (value == null || value.contains("${")) {
+                    return null;
+                }
+                Path configured = Path.of(value.replace("\\\\", "\\"));
+                return (configured.isAbsolute() ? configured : serverRoot.resolve(configured))
+                    .toAbsolutePath()
+                    .normalize();
+            }
+        } catch (IOException | RuntimeException exception) {
+            LOGGER.debug("Could not read BlueMap data path from {}", coreConfig, exception);
+        }
+        return null;
     }
 
     private void publish() {
@@ -319,7 +493,8 @@ final class BlueMapPlayerModelsServer {
                 .filter(player -> map.getWorld().getId().equals(player.worldId))
                 .filter(player -> api.getWebApp().getPlayerVisibility(UUID.fromString(player.uuid)))
                 .toList();
-            byte[] json = GSON.toJson(new Payload(System.currentTimeMillis(), visible))
+            List<EntityData> entities = entitiesByWorld.getOrDefault(map.getWorld().getId(), List.of());
+            byte[] json = GSON.toJson(new Payload(System.currentTimeMillis(), visible, entities))
                 .getBytes(StandardCharsets.UTF_8);
             publications.add(new Publication(map.getAssetStorage(), json));
         }
@@ -332,7 +507,7 @@ final class BlueMapPlayerModelsServer {
                     LOGGER.warn("Failed to publish player models to BlueMap", exception);
                 }
             }
-        }).whenComplete((ignored, error) -> {
+        }, publicationExecutor).whenComplete((ignored, error) -> {
             publishing.set(false);
             if (error != null) {
                 LOGGER.warn("Failed to publish player models to BlueMap", error);
@@ -387,13 +562,18 @@ final class BlueMapPlayerModelsServer {
         }
     }
 
-    private record SkinInfo(URI url, boolean slim) {
-        private static final SkinInfo EMPTY = new SkinInfo(null, false);
+    private static ExecutorService daemonExecutor(String name, int threads) {
+        AtomicInteger counter = new AtomicInteger();
+        return Executors.newFixedThreadPool(threads, task -> {
+            Thread thread = new Thread(task, name + "-" + counter.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 
     private record Publication(AssetStorage storage, byte[] json) {}
 
-    private record Payload(long updatedAt, List<PlayerData> players) {}
+    private record Payload(long updatedAt, List<PlayerData> players, List<EntityData> entities) {}
 
     private record State(List<PlayerData> players) {}
 
@@ -428,5 +608,19 @@ final class BlueMapPlayerModelsServer {
         int damage;
         int maxDamage;
         boolean glint;
+    }
+
+    private static final class EntityData {
+        String uuid;
+        String type;
+        String name;
+        String customName;
+        double x;
+        double y;
+        double z;
+        float yaw;
+        float pitch;
+        float width;
+        float height;
     }
 }
