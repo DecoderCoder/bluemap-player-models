@@ -41,7 +41,7 @@ repositories {
 
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
-    compileOnly "de.bluecolored.bluemap:BlueMapAPI:${bluemap_api_version}"
+    compileOnly "de.bluecolored.bluemap:BlueMapAPI:${bluemap_compile_api_version}"
 }
 
 tasks.named('processResources', ProcessResources).configure {

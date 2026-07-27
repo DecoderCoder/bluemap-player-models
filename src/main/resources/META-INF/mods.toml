@@ -29,7 +29,6 @@ side="SERVER"
 [[dependencies.${mod_id}]]
 modId="bluemap"
 mandatory=true
-versionRange="[5.3,5.4)"
+versionRange="[5.12,5.13)"
 ordering="AFTER"
 side="SERVER"
-

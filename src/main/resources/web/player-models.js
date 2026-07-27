@@ -18,8 +18,13 @@
         ...inventory.slice(0, 9).map((item, index) => ({item, index}))
     ];
 
+    const playerDataUrl = mapData => {
+        const root = mapData?.mapDataRoot || mapData?.dataUrl;
+        return root && `${root.replace(/\/$/, "")}/${DATA_ASSET}`;
+    };
+
     if (globalThis.__BPM_TEST__) {
-        globalThis.__BPM_TEST_API__ = {boxRegions, inventoryOrder};
+        globalThis.__BPM_TEST_API__ = {boxRegions, inventoryOrder, playerDataUrl};
         return;
     }
     if (window.__blueMapPlayerModels) return;
@@ -344,11 +349,12 @@
 
         async function refresh() {
             const map = app.mapViewer.map;
-            if (!map?.data?.dataUrl || loading) return;
+            const dataUrl = playerDataUrl(map?.data);
+            if (!dataUrl || loading) return;
             loading = true;
             try {
                 const response = await fetch(
-                    `${map.data.dataUrl}${DATA_ASSET}?v=${Date.now()}`,
+                    `${dataUrl}?v=${Date.now()}`,
                     {cache: "no-store"}
                 );
                 if (response.ok) reconcile(await response.json());

@@ -1,6 +1,6 @@
 # BlueMap Player Models
 
-A server-side Forge 1.20.1 add-on for BlueMap 5.3 that replaces the map's
+A server-side Forge 1.20.1 add-on for BlueMap 5.12 that replaces the map's
 floating player heads with animated 3D player models.
 
 ## Features
@@ -22,18 +22,21 @@ remain available in the inventory tooltip.
 
 - Minecraft 1.20.1
 - Forge 47.x
-- [BlueMap 5.3 Forge 1.20](https://github.com/BlueMap-Minecraft/BlueMap/releases/tag/v5.3)
-- Java 17 or newer
+- [BlueMap 5.12 Forge 1.20–1.20.4](https://github.com/BlueMap-Minecraft/BlueMap/releases/tag/v5.12)
+- Java 21 or newer on the server
 
-BlueMap 5.3 is intentionally pinned because it is the latest BlueMap release
-that provides a Forge build for Minecraft 1.20.1.
+Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
+`bluemap-5.12-forge.jar` targets newer Minecraft versions.
 
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.0.0.jar` into the server's `mods`
-   folder beside `BlueMap-5.3-forge-1.20.jar`.
+2. Copy `build/libs/bluemap_player_models-1.0.1.jar` into the server's `mods`
+   folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
+
+The jar is safe if a modpack synchronizer also copies it to clients: its
+BlueMap integration is initialized only on a dedicated server.
 
 The add-on copies and registers its JavaScript/CSS through BlueMapAPI. Players
 appear after BlueMap has loaded a map and the player has joined once. Skin files
@@ -51,4 +54,3 @@ intentional.
 gradlew.bat build
 node src/test/js/player-models.test.cjs
 ```
-
