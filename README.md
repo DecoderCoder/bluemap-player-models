@@ -14,6 +14,7 @@ models and loaded entities to the map.
 - Up to 128 loaded non-player entities per mapped world, with vanilla textures
   and simple 3D model families
 - BlueMap-styled, responsive settings and inventory side panels
+- Independent 1–30 second player and entity display-update intervals
 
 The add-on reuses BlueMap's texture gallery when possible and exposes vanilla
 entity, armor, item, and block textures from the Minecraft client jar already
@@ -34,7 +35,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.1.0.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.1.1.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 
@@ -43,8 +44,9 @@ BlueMap integration is initialized only on a dedicated server.
 
 The add-on copies and registers versioned JavaScript/CSS through BlueMapAPI.
 Players appear after BlueMap has loaded a map and the player has joined once.
-Skins are obtained through BlueMap's configured skin provider and cached in its
-webroot.
+Full skins use the signed texture URL already present in each online player's
+profile, with BlueMap's configured skin provider as a fallback. Fingerprinted
+PNGs are cached through every map's BlueMap asset storage.
 
 ## Privacy
 

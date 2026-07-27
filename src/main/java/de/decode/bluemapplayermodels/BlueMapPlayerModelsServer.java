@@ -28,18 +28,28 @@ import net.minecraftforge.registries.ForgeRegistries;
 import org.slf4j.Logger;
 
 import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -58,10 +68,16 @@ import java.util.zip.ZipFile;
 final class BlueMapPlayerModelsServer {
     private static final Logger LOGGER = LogUtils.getLogger();
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
+    private static final HttpClient HTTP = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(10))
+        .followRedirects(HttpClient.Redirect.NEVER)
+        .build();
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
-    private static final String WEB_ASSET_VERSION = "1.1.0";
+    private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
+    private static final String WEB_ASSET_VERSION = "1.1.1";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
+    private static final int MAX_SKIN_BYTES = 2_000_000;
     private static final int ENTITY_LIMIT = 128;
     private static final long SKIN_RETRY_DELAY_MS = 60_000;
     private static final long SKIN_REFRESH_MS = 24 * 60 * 60 * 1_000L;
@@ -78,11 +94,15 @@ final class BlueMapPlayerModelsServer {
     private final Map<UUID, PlayerData> players = new ConcurrentHashMap<>();
     private final AtomicBoolean publishing = new AtomicBoolean();
     private final Set<UUID> requestedSkins = ConcurrentHashMap.newKeySet();
+    private final Set<String> publishedSkins = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, String> skinAssets = new ConcurrentHashMap<>();
+    private final Map<UUID, URI> skinSources = new ConcurrentHashMap<>();
     private final Map<UUID, Long> skinRetryAt = new ConcurrentHashMap<>();
     private final ExecutorService skinExecutor = daemonExecutor("bluemap-player-models-skin", 2);
     private final ExecutorService publicationExecutor = daemonExecutor("bluemap-player-models-publish", 1);
 
     private volatile BlueMapAPI blueMap;
+    private volatile long apiGeneration;
     private volatile Map<String, List<EntityData>> entitiesByWorld = Map.of();
     private volatile Path skinRoot;
     private MinecraftServer server;
@@ -94,9 +114,11 @@ final class BlueMapPlayerModelsServer {
         BlueMapAPI.onEnable(this::enableBlueMap);
         BlueMapAPI.onDisable(api -> {
             if (blueMap == api) {
+                apiGeneration++;
                 blueMap = null;
                 entitiesByWorld = Map.of();
                 skinRoot = null;
+                publishedSkins.clear();
             }
         });
     }
@@ -161,7 +183,8 @@ final class BlueMapPlayerModelsServer {
             api.getWebApp().registerScript(ASSET_ROOT + "/" + script);
             api.getWebApp().registerStyle(ASSET_ROOT + "/" + style);
             skinRoot = Files.createDirectories(root.resolve(ASSET_ROOT).resolve("skins"));
-            requestedSkins.clear();
+            apiGeneration++;
+            publishedSkins.clear();
             skinRetryAt.clear();
             blueMap = api;
             publish();
@@ -267,9 +290,9 @@ final class BlueMapPlayerModelsServer {
         data.selectedSlot = player.getInventory().selected;
         data.worldId = worldId(player, previous);
 
-        data.slim = hasSlimSkin(player);
-        data.skin = ASSET_ROOT + "/skins/" + data.uuid + ".png";
-        cacheSkin(player.getUUID());
+        SkinInfo skin = skinInfo(player);
+        data.slim = skin.slim();
+        data.skin = skinAssets.get(player.getUUID());
 
         data.mainHand = item(player.getMainHandItem());
         data.offHand = item(player.getOffhandItem());
@@ -282,6 +305,7 @@ final class BlueMapPlayerModelsServer {
         data.inventory = new ArrayList<>(player.getInventory().items.size());
         player.getInventory().items.forEach(stack -> data.inventory.add(item(stack)));
         players.put(player.getUUID(), data);
+        cacheSkin(player.getUUID(), skin.uri());
     }
 
     private String worldId(ServerPlayer player, PlayerData previous) {
@@ -312,12 +336,12 @@ final class BlueMapPlayerModelsServer {
         return item;
     }
 
-    private static boolean hasSlimSkin(ServerPlayer player) {
+    private static SkinInfo skinInfo(ServerPlayer player) {
         Property property = player.getGameProfile().getProperties().get("textures").stream()
             .findFirst()
             .orElse(null);
         if (property == null) {
-            return false;
+            return SkinInfo.EMPTY;
         }
 
         try {
@@ -325,24 +349,43 @@ final class BlueMapPlayerModelsServer {
             JsonObject skin = JsonParser.parseString(json).getAsJsonObject()
                 .getAsJsonObject("textures")
                 .getAsJsonObject("SKIN");
-            return skin.has("metadata")
+            URI uri = validatedSkinUri(skin.get("url").getAsString());
+            boolean slim = skin.has("metadata")
                 && "slim".equals(skin.getAsJsonObject("metadata").get("model").getAsString());
+            return new SkinInfo(uri, slim);
         } catch (RuntimeException exception) {
             LOGGER.debug("Invalid skin metadata for {}", player.getGameProfile().getName(), exception);
-            return false;
+            return SkinInfo.EMPTY;
         }
     }
 
-    private void cacheSkin(UUID uuid) {
+    private static URI validatedSkinUri(String value) {
+        URI uri = URI.create(value);
+        String path = uri.getRawPath();
+        if (!"textures.minecraft.net".equalsIgnoreCase(uri.getHost())
+            || (!"http".equalsIgnoreCase(uri.getScheme())
+                && !"https".equalsIgnoreCase(uri.getScheme()))
+            || path == null
+            || !path.matches("/texture/[0-9a-fA-F]+")) {
+            throw new IllegalArgumentException("Unexpected Minecraft skin URL");
+        }
+        return URI.create("https://textures.minecraft.net" + path);
+    }
+
+    private void cacheSkin(UUID uuid, URI uri) {
         Path root = skinRoot;
         BlueMapAPI api = blueMap;
+        long generation = apiGeneration;
         if (root == null || api == null) {
             return;
         }
 
         Path target = root.resolve(uuid + ".png");
         long now = System.currentTimeMillis();
-        if (isFreshSkin(target, now)
+        boolean sourceChanged = uri != null && !uri.equals(skinSources.get(uuid));
+        boolean fresh = !sourceChanged && isFreshSkin(target, now);
+        String knownAsset = skinAssets.get(uuid);
+        if ((fresh && knownAsset != null && isSkinPublished(api, knownAsset))
             || skinRetryAt.getOrDefault(uuid, 0L) > now
             || !requestedSkins.add(uuid)) {
             return;
@@ -351,17 +394,44 @@ final class BlueMapPlayerModelsServer {
         CompletableFuture.runAsync(() -> {
             Path temporary = target.resolveSibling(target.getFileName() + ".tmp");
             try {
-                var skin = api.getPlugin().getSkinProvider().load(uuid);
-                if (skin.isEmpty()) {
-                    skinRetryAt.put(uuid, System.currentTimeMillis() + SKIN_RETRY_DELAY_MS);
+                if (!isActiveApi(api, generation)) {
                     return;
                 }
-                Files.createDirectories(target.getParent());
-                if (!ImageIO.write(skin.get(), "png", temporary.toFile())) {
-                    throw new IOException("No PNG image writer is available");
+                boolean published = true;
+                if (Files.isRegularFile(target) && Files.size(target) > 0) {
+                    String cachedAsset = skinAssetName(uuid, target);
+                    published = publishSkin(api, generation, target, cachedAsset);
+                    activateSkin(api, generation, uuid, cachedAsset);
                 }
-                replaceAtomically(temporary, target);
-                skinRetryAt.remove(uuid);
+                if (!fresh) {
+                    BufferedImage skin = loadSkin(api, uuid, uri);
+                    if (skin == null) {
+                        skinRetryAt.put(uuid, System.currentTimeMillis() + SKIN_RETRY_DELAY_MS);
+                        return;
+                    }
+                    if (!isActiveApi(api, generation)) {
+                        return;
+                    }
+                    Files.createDirectories(target.getParent());
+                    if (!ImageIO.write(skin, "png", temporary.toFile())) {
+                        throw new IOException("No PNG image writer is available");
+                    }
+                    replaceAtomically(temporary, target);
+                    if (uri != null) {
+                        skinSources.put(uuid, uri);
+                    }
+                    String asset = skinAssetName(uuid, target);
+                    published = publishSkin(api, generation, target, asset);
+                    activateSkin(api, generation, uuid, asset);
+                }
+                if (published) {
+                    skinRetryAt.remove(uuid);
+                } else {
+                    skinRetryAt.put(uuid, System.currentTimeMillis() + SKIN_RETRY_DELAY_MS);
+                }
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                skinRetryAt.put(uuid, System.currentTimeMillis() + SKIN_RETRY_DELAY_MS);
             } catch (IOException | RuntimeException exception) {
                 skinRetryAt.put(uuid, System.currentTimeMillis() + SKIN_RETRY_DELAY_MS);
                 LOGGER.warn("Failed to cache skin for {}", uuid, exception);
@@ -374,6 +444,106 @@ final class BlueMapPlayerModelsServer {
                 }
             }
         }, skinExecutor);
+    }
+
+    private boolean isActiveApi(BlueMapAPI api, long generation) {
+        return blueMap == api && apiGeneration == generation;
+    }
+
+    private void activateSkin(BlueMapAPI api, long generation, UUID uuid, String asset) {
+        if (!isActiveApi(api, generation)) {
+            return;
+        }
+        skinAssets.put(uuid, asset);
+        PlayerData player = players.get(uuid);
+        if (player != null) {
+            player.skin = asset;
+        }
+        publish();
+    }
+
+    private static BufferedImage loadSkin(BlueMapAPI api, UUID uuid, URI uri)
+        throws IOException, InterruptedException {
+        if (uri != null) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder(uri)
+                    .timeout(Duration.ofSeconds(15))
+                    .GET()
+                    .build();
+                HttpResponse<InputStream> response = HTTP.send(
+                    request,
+                    HttpResponse.BodyHandlers.ofInputStream()
+                );
+                try (InputStream input = response.body()) {
+                    byte[] body = input.readNBytes(MAX_SKIN_BYTES + 1);
+                    if (response.statusCode() == 200 && body.length <= MAX_SKIN_BYTES) {
+                        BufferedImage image = ImageIO.read(new ByteArrayInputStream(body));
+                        if (isMinecraftSkin(image)) {
+                            return image;
+                        }
+                    }
+                }
+                LOGGER.debug("Invalid skin response for {}: HTTP {}", uuid, response.statusCode());
+            } catch (IOException exception) {
+                LOGGER.debug("Direct skin download failed for {}; trying BlueMap's provider", uuid, exception);
+            }
+        }
+
+        BufferedImage image = api.getPlugin().getSkinProvider().load(uuid).orElse(null);
+        return isMinecraftSkin(image) ? image : null;
+    }
+
+    private static boolean isMinecraftSkin(BufferedImage image) {
+        return image != null
+            && image.getWidth() == 64
+            && (image.getHeight() == 32 || image.getHeight() == 64);
+    }
+
+    private boolean isSkinPublished(BlueMapAPI api, String asset) {
+        return api.getMaps().stream()
+            .allMatch(map -> isSkinPublished(map, asset));
+    }
+
+    private boolean isSkinPublished(BlueMapMap map, String asset) {
+        return asset != null && publishedSkins.contains(map.getId() + ":" + asset);
+    }
+
+    private boolean publishSkin(BlueMapAPI api, long generation, Path source, String asset) {
+        boolean complete = true;
+        for (BlueMapMap map : api.getMaps()) {
+            if (!isActiveApi(api, generation)) {
+                return false;
+            }
+            String key = map.getId() + ":" + asset;
+            if (publishedSkins.contains(key)) {
+                continue;
+            }
+            try (InputStream input = Files.newInputStream(source);
+                 OutputStream output = map.getAssetStorage().writeAsset(asset)) {
+                input.transferTo(output);
+            } catch (IOException exception) {
+                publishedSkins.remove(key);
+                complete = false;
+                LOGGER.warn("Failed to publish skin {} to BlueMap map {}", asset, map.getId(), exception);
+                continue;
+            }
+            if (!isActiveApi(api, generation)) {
+                return false;
+            }
+            publishedSkins.add(key);
+        }
+        return complete;
+    }
+
+    private static String skinAssetName(UUID uuid, Path source) throws IOException {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(source));
+            String hash = HexFormat.of().formatHex(digest, 0, 8);
+            // ponytail: superseded fingerprinted skins stay cached; prune if storage growth becomes measurable.
+            return SKIN_ASSET_ROOT + "/" + uuid + "-" + hash + ".png";
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IOException("SHA-256 is unavailable", exception);
+        }
     }
 
     private static boolean isFreshSkin(Path target, long now) {
@@ -483,7 +653,12 @@ final class BlueMapPlayerModelsServer {
 
     private void publish() {
         BlueMapAPI api = blueMap;
-        if (api == null || !publishing.compareAndSet(false, true)) {
+        long generation = apiGeneration;
+        if (api == null) {
+            return;
+        }
+        players.keySet().forEach(uuid -> cacheSkin(uuid, null));
+        if (!publishing.compareAndSet(false, true)) {
             return;
         }
 
@@ -494,13 +669,25 @@ final class BlueMapPlayerModelsServer {
                 .filter(player -> api.getWebApp().getPlayerVisibility(UUID.fromString(player.uuid)))
                 .toList();
             List<EntityData> entities = entitiesByWorld.getOrDefault(map.getWorld().getId(), List.of());
-            byte[] json = GSON.toJson(new Payload(System.currentTimeMillis(), visible, entities))
+            var payload = GSON.toJsonTree(
+                new Payload(System.currentTimeMillis(), visible, entities)
+            ).getAsJsonObject();
+            var jsonPlayers = payload.getAsJsonArray("players");
+            for (int index = 0; index < visible.size(); index++) {
+                if (!isSkinPublished(map, visible.get(index).skin)) {
+                    jsonPlayers.get(index).getAsJsonObject().remove("skin");
+                }
+            }
+            byte[] json = GSON.toJson(payload)
                 .getBytes(StandardCharsets.UTF_8);
             publications.add(new Publication(map.getAssetStorage(), json));
         }
 
         CompletableFuture.runAsync(() -> {
             for (Publication publication : publications) {
+                if (!isActiveApi(api, generation)) {
+                    return;
+                }
                 try (OutputStream output = publication.storage.writeAsset(PLAYER_DATA_ASSET)) {
                     output.write(publication.json);
                 } catch (IOException exception) {
@@ -512,11 +699,15 @@ final class BlueMapPlayerModelsServer {
             if (error != null) {
                 LOGGER.warn("Failed to publish player models to BlueMap", error);
             }
+            if (blueMap != null && !isActiveApi(api, generation)) {
+                publish();
+            }
         });
     }
 
     private void loadState() {
         players.clear();
+        skinAssets.clear();
         if (stateFile == null || !Files.isRegularFile(stateFile)) {
             // ponytail: only players seen after installation are tracked; import playerdata NBT if historical coverage is needed.
             return;
@@ -531,8 +722,18 @@ final class BlueMapPlayerModelsServer {
                 if (player == null || player.uuid == null || player.worldId == null) {
                     continue;
                 }
+                UUID uuid = UUID.fromString(player.uuid);
                 player.online = false;
-                players.put(UUID.fromString(player.uuid), player);
+                String skinPrefix = SKIN_ASSET_ROOT + "/" + uuid + "-";
+                if (player.skin != null
+                    && player.skin.startsWith(skinPrefix)
+                    && player.skin.endsWith(".png")
+                    && !player.skin.contains("..")) {
+                    skinAssets.put(uuid, player.skin);
+                } else {
+                    player.skin = null;
+                }
+                players.put(uuid, player);
             }
         } catch (IOException | RuntimeException exception) {
             LOGGER.error("Failed to read {}", stateFile, exception);
@@ -569,6 +770,10 @@ final class BlueMapPlayerModelsServer {
             thread.setDaemon(true);
             return thread;
         });
+    }
+
+    private record SkinInfo(URI uri, boolean slim) {
+        private static final SkinInfo EMPTY = new SkinInfo(null, false);
     }
 
     private record Publication(AssetStorage storage, byte[] json) {}

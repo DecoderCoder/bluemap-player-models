@@ -11,6 +11,8 @@ const {
     entityFamily,
     entityTextureKeys,
     inventoryOrder,
+    mapAssetUrl,
+    normalizeInterval,
     playerDataUrl,
     splitId
 } = global.__BPM_TEST_API__;
@@ -34,6 +36,16 @@ assert.equal(
     playerDataUrl({dataUrl: "maps/world/"}),
     "maps/world/assets/bluemap-player-models/players.json"
 );
+assert.equal(
+    mapAssetUrl(
+        {mapDataRoot: "custom/maps/world/"},
+        "bluemap-player-models/skins/player skin.png"
+    ),
+    "custom/maps/world/assets/bluemap-player-models/skins/player%20skin.png"
+);
+assert.equal(mapAssetUrl({mapDataRoot: "maps/world"}, "../bad.png"), null);
+assert.equal(normalizeInterval(5000), 5000);
+assert.equal(normalizeInterval(0), 1000);
 assert.deepEqual(splitId("minecraft:diamond_sword"), {
     namespace: "minecraft",
     path: "diamond_sword"

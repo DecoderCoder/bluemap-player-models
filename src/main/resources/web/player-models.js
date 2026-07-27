@@ -1,10 +1,11 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.1.0";
+    const VERSION = "1.1.1";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
+    const REFRESH_INTERVALS = [1000, 2000, 5000, 10000, 30000];
 
     const boxRegions = (x, y, width, height, depth) => [
         [x + depth + width, y + depth, depth, height],
@@ -23,6 +24,18 @@
     const playerDataUrl = mapData => {
         const root = mapData?.mapDataRoot || mapData?.dataUrl;
         return root && `${root.replace(/\/$/, "")}/${DATA_ASSET}`;
+    };
+
+    const mapAssetUrl = (mapData, asset) => {
+        const root = mapData?.mapDataRoot || mapData?.dataUrl;
+        if (!root || !asset || asset.includes("..") || asset.startsWith("/")) return null;
+        const path = asset.split("/").map(encodeURIComponent).join("/");
+        return `${root.replace(/\/$/, "")}/assets/${path}`;
+    };
+
+    const normalizeInterval = value => {
+        const interval = Number(value);
+        return REFRESH_INTERVALS.includes(interval) ? interval : 1000;
     };
 
     const splitId = id => {
@@ -130,6 +143,8 @@
             entityFamily,
             entityTextureKeys,
             inventoryOrder,
+            mapAssetUrl,
+            normalizeInterval,
             playerDataUrl,
             splitId
         };
@@ -160,11 +175,13 @@
         const ui = createUi();
         const panel = ui.querySelector("#bpm-panel");
         const settingsButton = ui.querySelector("#bpm-settings-button");
-        let loading = false;
+        let refreshRequest = null;
+        let refreshTimer = null;
         let mapId = null;
         let generation = 0;
         let selectedPlayerId = null;
         let lastStatus = "";
+        const dueAt = {players: 0, entities: 0};
 
         actorScene.name = "bluemap-live-actors";
         app.mapViewer.markers.add(actorScene);
@@ -188,22 +205,31 @@
                 heldItems: true,
                 offlinePlayers: true,
                 entities: true,
-                labels: true
+                labels: true,
+                playerRefreshMs: 1000,
+                entityRefreshMs: 1000
             };
             try {
-                return {...defaults, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}")};
+                const loaded = {...defaults, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}")};
+                loaded.playerRefreshMs = normalizeInterval(loaded.playerRefreshMs);
+                loaded.entityRefreshMs = normalizeInterval(loaded.entityRefreshMs);
+                return loaded;
             } catch {
                 return defaults;
             }
         }
 
         function saveSettings() {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+            } catch {
+                // Settings still apply for this browser session.
+            }
         }
 
         function buildSettings() {
             const definitions = [
-                ["playerModels", "3D player models", "Use BlueMap's native heads as fallback"],
+                ["playerModels", "3D player models", "Replace BlueMap's native player heads"],
                 ["animatePlayers", "Walking animation", "Animate player arms and legs"],
                 ["armor", "Player armor", "Show equipped armor layers"],
                 ["heldItems", "Held items", "Show main-hand and off-hand items"],
@@ -236,6 +262,39 @@
                 update();
                 list.append(button);
             }
+
+            const intervalList = ui.querySelector("#bpm-interval-list");
+            [
+                ["playerRefreshMs", "players", "Player updates", "Apply new positions and inventories"],
+                ["entityRefreshMs", "entities", "Entity updates", "Apply new entity positions"]
+            ].forEach(([key, target, label, detail]) => {
+                const row = document.createElement("label");
+                const text = document.createElement("span");
+                const strong = document.createElement("strong");
+                const small = document.createElement("small");
+                const select = document.createElement("select");
+                row.className = "bpm-setting-row bpm-select-row";
+                strong.textContent = label;
+                small.textContent = detail;
+                text.append(strong, small);
+                select.className = "bpm-setting-select";
+                select.setAttribute("aria-label", label);
+                REFRESH_INTERVALS.forEach(interval => {
+                    const option = document.createElement("option");
+                    option.value = String(interval);
+                    option.textContent = `${interval / 1000}s`;
+                    select.append(option);
+                });
+                select.value = String(settings[key]);
+                select.addEventListener("change", () => {
+                    settings[key] = normalizeInterval(select.value);
+                    dueAt[target] = 0;
+                    saveSettings();
+                    queueNextRefresh();
+                });
+                row.append(text, select);
+                intervalList.append(row);
+            });
         }
 
         function openPanel(view, player = null) {
@@ -430,6 +489,11 @@
             return pivot;
         }
 
+        function currentAssetUrl(asset) {
+            const path = mapAssetUrl(app.mapViewer.map?.data, asset);
+            return path ? new URL(path, document.baseURI).href : null;
+        }
+
         function createOfflineLabel(data) {
             const element = document.createElement("button");
             const image = document.createElement("img");
@@ -438,7 +502,11 @@
             element.className = "bpm-offline-label";
             image.alt = "";
             image.draggable = false;
-            image.src = `${new URL(data.skin, document.baseURI).href}?bpm=${VERSION}`;
+            image.src = currentAssetUrl(`playerheads/${data.uuid}.png`)
+                || new URL("assets/steve.png", document.baseURI).href;
+            image.addEventListener("error", () => {
+                image.src = new URL("assets/steve.png", document.baseURI).href;
+            }, {once: true});
             text.textContent = data.name;
             element.append(image, text);
             return element;
@@ -522,7 +590,9 @@
         }
 
         async function loadSkin(actor, attempt = 0) {
-            const url = `${new URL(actor.data.skin, document.baseURI).href}?bpm=${VERSION}`;
+            const source = currentAssetUrl(actor.data.skin);
+            if (!source) return;
+            const url = `${source}?bpm=${VERSION}`;
             const texture = await loadUrlTexture(url);
             if (actor.removed) return;
             if (!texture) {
@@ -736,15 +806,15 @@
         function applyPlayerVisibility(actor) {
             const show = settings.playerModels
                 && (actor.data.online || settings.offlinePlayers);
-            actor.model.visible = show
-                && (!actor.data.online || (!!actor.nativeMarker && actor.skinReady));
+            const onlineReady = !!actor.nativeMarker;
+            actor.model.visible = show && (!actor.data.online || onlineReady);
             actor.offlineAnchor.visible = show && !actor.data.online;
             actor.armorMeshes.forEach(mesh => mesh.visible = settings.armor);
             actor.heldMeshes.forEach(mesh => mesh.visible = settings.heldItems);
             actor.label.classList.toggle("bpm-hidden-label", !settings.labels);
             actor.nativeMarker?.element?.classList.toggle(
                 "bpm-model-ready",
-                show && actor.skinReady
+                show && onlineReady
             );
         }
 
@@ -1092,38 +1162,40 @@
             return element;
         }
 
-        function reconcile(payload) {
-            const incomingPlayers = new Set();
-            for (const data of Array.isArray(payload.players) ? payload.players : []) {
-                if (!data?.uuid) continue;
-                incomingPlayers.add(data.uuid);
-                const existing = players.get(data.uuid);
-                if (existing && existing.data.slim === data.slim && existing.data.skin === data.skin) {
-                    updatePlayer(existing, data);
-                } else {
-                    if (existing) removePlayer(existing);
-                    players.set(data.uuid, createPlayer(data));
+        function reconcile(payload, update) {
+            if (update.players) {
+                const incomingPlayers = new Set();
+                for (const data of Array.isArray(payload.players) ? payload.players : []) {
+                    if (!data?.uuid) continue;
+                    incomingPlayers.add(data.uuid);
+                    const existing = players.get(data.uuid);
+                    if (existing && existing.data.slim === data.slim && existing.data.skin === data.skin) {
+                        updatePlayer(existing, data);
+                    } else {
+                        if (existing) removePlayer(existing);
+                        players.set(data.uuid, createPlayer(data));
+                    }
                 }
-            }
-            players.forEach((actor, id) => {
-                if (!incomingPlayers.has(id)) {
-                    removePlayer(actor);
-                    players.delete(id);
-                }
-            });
-            const inventoryView = ui.querySelector("#bpm-inventory-view");
-            if (panel.classList.contains("bpm-open") && !inventoryView.hidden) {
-                const selected = players.get(selectedPlayerId)?.data;
-                if (selected) {
-                    ui.querySelector("#bpm-panel-title").textContent = `${selected.name}'s inventory`;
-                    renderInventory(selected);
-                } else {
-                    closePanel();
+                players.forEach((actor, id) => {
+                    if (!incomingPlayers.has(id)) {
+                        removePlayer(actor);
+                        players.delete(id);
+                    }
+                });
+                const inventoryView = ui.querySelector("#bpm-inventory-view");
+                if (panel.classList.contains("bpm-open") && !inventoryView.hidden) {
+                    const selected = players.get(selectedPlayerId)?.data;
+                    if (selected) {
+                        ui.querySelector("#bpm-panel-title").textContent = `${selected.name}'s inventory`;
+                        renderInventory(selected);
+                    } else {
+                        closePanel();
+                    }
                 }
             }
 
-            const incomingEntities = new Set();
-            if (settings.entities) {
+            if (update.entities && settings.entities) {
+                const incomingEntities = new Set();
                 for (const data of Array.isArray(payload.entities) ? payload.entities : []) {
                     if (!data?.uuid || !data?.type) continue;
                     incomingEntities.add(data.uuid);
@@ -1131,39 +1203,72 @@
                     if (actor) updateEntity(actor, data);
                     else entities.set(data.uuid, createEntity(data));
                 }
+                entities.forEach((actor, id) => {
+                    if (!incomingEntities.has(id)) {
+                        removeEntity(actor);
+                        entities.delete(id);
+                    }
+                });
             }
-            entities.forEach((actor, id) => {
-                if (!incomingEntities.has(id)) {
-                    removeEntity(actor);
-                    entities.delete(id);
-                }
-            });
             updateCounts();
             setStatus("ok", `Connected - updated ${new Date(payload.updatedAt || Date.now()).toLocaleTimeString()}`);
             app.mapViewer.redraw();
         }
 
-        async function refresh() {
+        function queueNextRefresh() {
+            const next = Math.min(
+                dueAt.players,
+                settings.entities ? dueAt.entities : Infinity
+            );
+            clearTimeout(refreshTimer);
+            refreshTimer = setTimeout(
+                refresh,
+                Number.isFinite(next) ? Math.max(0, next - Date.now()) : settings.playerRefreshMs
+            );
+        }
+
+        async function refresh(force = false) {
             const dataUrl = playerDataUrl(app.mapViewer.map?.data);
-            if (!dataUrl || loading) return;
+            if (!dataUrl) {
+                dueAt.players = Date.now() + 1000;
+                dueAt.entities = dueAt.players;
+                queueNextRefresh();
+                return;
+            }
+            if (refreshRequest) return;
+            const now = Date.now();
+            const update = {
+                players: force || now >= dueAt.players,
+                entities: settings.entities && (force || now >= dueAt.entities)
+            };
+            if (!update.players && !update.entities) {
+                queueNextRefresh();
+                return;
+            }
             const token = generation;
-            loading = true;
+            const request = new AbortController();
+            refreshRequest = request;
             try {
                 const response = await fetch(
                     `${dataUrl}?bpm=${VERSION}-${Date.now()}`,
-                    {cache: "no-store"}
+                    {cache: "no-store", signal: request.signal}
                 );
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 const payload = await response.json();
-                if (token === generation) reconcile(payload);
+                if (token === generation) reconcile(payload, update);
             } catch (error) {
-                if (token === generation) {
+                if (error.name !== "AbortError" && token === generation) {
                     setStatus("error", `Waiting for add-on data (${error.message})`);
                     console.debug("BlueMap Player Models data is not ready", error);
                 }
             } finally {
-                loading = false;
-                if (token !== generation) refresh();
+                if (refreshRequest === request) {
+                    refreshRequest = null;
+                    const completed = Date.now();
+                    if (update.players) dueAt.players = completed + settings.playerRefreshMs;
+                    if (update.entities) dueAt.entities = completed + settings.entityRefreshMs;
+                    queueNextRefresh();
+                }
             }
         }
 
@@ -1175,9 +1280,13 @@
 
         function resetForMap() {
             const nextMapId = app.mapViewer.map?.data?.id;
-            if (nextMapId === mapId) return;
             mapId = nextMapId;
             generation++;
+            refreshRequest?.abort();
+            refreshRequest = null;
+            clearTimeout(refreshTimer);
+            dueAt.players = 0;
+            dueAt.entities = 0;
             players.forEach(removePlayer);
             entities.forEach(removeEntity);
             players.clear();
@@ -1189,9 +1298,9 @@
             setStatus("waiting", "Waiting for map data");
             const token = generation;
             loadTextureGallery(app.mapViewer.map, token).then(() => {
-                if (token === generation) refresh();
+                if (token === generation) refresh(true);
             });
-            refresh();
+            refresh(true);
         }
 
         function applySettings(changed) {
@@ -1199,11 +1308,16 @@
             if (!settings.entities) {
                 entities.forEach(removeEntity);
                 entities.clear();
+                dueAt.entities = Infinity;
                 updateCounts();
             } else {
                 entities.forEach(actor => actor.root.visible = true);
-                if (changed === "entities") refresh();
+                if (changed === "entities") {
+                    dueAt.entities = 0;
+                    refresh();
+                }
             }
+            queueNextRefresh();
             app.mapViewer.redraw();
         }
 
@@ -1278,12 +1392,8 @@
 
         app.events.addEventListener("bluemapMapChanged", resetForMap);
         app.events.addEventListener("bluemapRenderFrame", animate);
-        setInterval(() => {
-            resetForMap();
-            refresh();
-        }, 1000);
         resetForMap();
-        refresh();
+        queueNextRefresh();
     };
 
     function createUi() {
@@ -1322,6 +1432,10 @@
                         <div class="bpm-group">
                             <span class="bpm-group-title">Map display</span>
                             <div id="bpm-settings-list" class="bpm-group-content"></div>
+                        </div>
+                        <div class="bpm-group">
+                            <span class="bpm-group-title">Update intervals</span>
+                            <div id="bpm-interval-list" class="bpm-group-content"></div>
                         </div>
                     </section>
                     <section id="bpm-inventory-view" hidden>

@@ -165,6 +165,21 @@
     background: var(--theme-bg-hover);
 }
 
+.bpm-select-row {
+    cursor: default;
+}
+
+.bpm-setting-select {
+    box-sizing: border-box;
+    min-width: 4.75em;
+    padding: 0.35em 0.45em;
+    color: var(--theme-fg);
+    background: var(--theme-bg-light);
+    border: 1px solid var(--theme-bg-hover);
+    border-radius: 0;
+    font: inherit;
+}
+
 .bpm-setting-row > span:first-child {
     display: grid;
     min-width: 0;
@@ -446,6 +461,7 @@
 }
 
 #bpm-ui button:focus-visible,
+#bpm-ui select:focus-visible,
 .bpm-slot:focus-visible {
     outline: 2px solid var(--theme-switch-button-on);
     outline-offset: -2px;
