@@ -12,6 +12,7 @@ const {
     entityFamily,
     entityTextureKeys,
     firstAnimationFrame,
+    grayscaleRgba,
     inventoryOrder,
     itemVisualKey,
     mapAssetUrl,
@@ -107,6 +108,18 @@ assert.deepEqual(firstAnimationFrame({animation: {frames: [{index: 3}]}}, 64, 16
     offsetY: 0
 });
 assert.equal(firstAnimationFrame({}, 16, 64), null);
+assert.deepEqual(
+    [...grayscaleRgba(new Uint8ClampedArray([
+        255, 0, 0, 255,
+        0, 255, 0, 128,
+        0, 0, 255, 0
+    ]))],
+    [
+        54, 54, 54, 255,
+        182, 182, 182, 128,
+        18, 18, 18, 0
+    ]
+);
 
 const sword = {
     id: "minecraft:diamond_sword",

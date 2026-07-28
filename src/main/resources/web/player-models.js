@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.0";
+    const VERSION = "1.2.1";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
@@ -181,6 +181,20 @@
         };
     };
 
+    const grayscaleRgba = pixels => {
+        for (let index = 0; index + 3 < pixels.length; index += 4) {
+            const gray = Math.round(
+                pixels[index] * 0.2126
+                + pixels[index + 1] * 0.7152
+                + pixels[index + 2] * 0.0722
+            );
+            pixels[index] = gray;
+            pixels[index + 1] = gray;
+            pixels[index + 2] = gray;
+        }
+        return pixels;
+    };
+
     const armorTextureKey = (itemId, layer) => {
         const path = splitId(itemId)?.path || "";
         let material = path.split("_")[0];
@@ -282,6 +296,7 @@
             entityFamily,
             entityTextureKeys,
             firstAnimationFrame,
+            grayscaleRgba,
             inventoryOrder,
             itemVisualKey,
             mapAssetUrl,
@@ -1108,6 +1123,26 @@
             return canvas.toDataURL("image/png");
         }
 
+        function grayscaleTexture(source) {
+            const width = source.image?.naturalWidth || source.image?.width || 0;
+            const height = source.image?.naturalHeight || source.image?.height || 0;
+            if (!width || !height || !Three.CanvasTexture) return null;
+            try {
+                const canvas = document.createElement("canvas");
+                const context = canvas.getContext("2d", {willReadFrequently: true});
+                if (!context) return null;
+                canvas.width = width;
+                canvas.height = height;
+                context.drawImage(source.image, 0, 0, width, height);
+                const image = context.getImageData(0, 0, width, height);
+                grayscaleRgba(image.data);
+                context.putImageData(image, 0, 0);
+                return configureTexture(new Three.CanvasTexture(canvas), source.flipY);
+            } catch {
+                return null;
+            }
+        }
+
         function updatePlayerLabel(actor) {
             actor.label.querySelector("span").textContent = actor.data.name;
             actor.label.classList.toggle("bpm-offline", !actor.data.online);
@@ -1150,6 +1185,8 @@
                 nativeMarker: null,
                 lastNativePosition: new Three.Vector3(),
                 movementUntil: 0,
+                skinTexture: null,
+                graySkinTexture: null,
                 skinReady: false,
                 removed: false
             };
@@ -1205,21 +1242,31 @@
         }
 
         async function loadSkin(actor, attempt = 0) {
-            const source = currentAssetUrl(actor.data.skin);
-            if (!source) return;
-            const url = `${source}?bpm=${VERSION}`;
-            const texture = await loadUrlTexture(url);
+            if (actor.removed) return;
+            const published = currentAssetUrl(actor.data.skin);
+            const fingerprint = encodeURIComponent(actor.data.skin || "pending");
+            const cached = new URL(
+                `skins/${encodeURIComponent(actor.data.uuid)}.png?bpm=${VERSION}-${fingerprint}`,
+                addonRoot
+            ).href;
+            let texture = null;
+            for (const url of [...new Set([
+                published ? `${published}?bpm=${VERSION}` : null,
+                cached
+            ].filter(Boolean))]) {
+                texture = await loadUrlTexture(url);
+                if (texture || actor.removed) break;
+            }
             if (actor.removed) return;
             if (!texture) {
-                if (attempt < 9) setTimeout(() => loadSkin(actor, attempt + 1), 2000);
+                if (attempt < 29) setTimeout(() => loadSkin(actor, attempt + 1), 2000);
                 return;
             }
-            actor.baseMaterial.map = texture;
-            actor.overlayMaterial.map = texture;
+            actor.skinTexture = texture;
+            actor.graySkinTexture?.dispose();
+            actor.graySkinTexture = grayscaleTexture(texture);
             actor.baseMaterial.userData.baseColor = 0xffffff;
             actor.overlayMaterial.userData.baseColor = 0xffffff;
-            actor.baseMaterial.needsUpdate = true;
-            actor.overlayMaterial.needsUpdate = true;
             actor.overlayMeshes.forEach(mesh => {
                 mesh.visible = texture.image?.height === texture.image?.width;
             });
@@ -1449,12 +1496,27 @@
         function updateTone(actor) {
             const online = actor.data.online;
             const gray = new Three.Color(0x858b92);
-            [actor.baseMaterial, actor.overlayMaterial, ...actor.equipmentMaterials]
-                .forEach(value => {
-                    const base = new Three.Color(value.userData.baseColor ?? 0x78909c);
-                    value.color.copy(online ? base : base.lerp(gray, 0.82));
-                    value.opacity = online ? (value.userData.baseOpacity ?? 1) : 0.68;
-                });
+            const skin = online
+                ? actor.skinTexture
+                : (actor.graySkinTexture || actor.skinTexture);
+            [actor.baseMaterial, actor.overlayMaterial].forEach(value => {
+                if (skin && value.map !== skin) {
+                    value.map = skin;
+                    value.needsUpdate = true;
+                }
+                const fallback = new Three.Color(value.userData.baseColor ?? 0x78909c);
+                if (actor.skinReady) {
+                    value.color.set(!online && !actor.graySkinTexture ? 0x858b92 : 0xffffff);
+                } else {
+                    value.color.copy(online ? fallback : fallback.lerp(gray, 0.82));
+                }
+                value.opacity = online ? 1 : 0.78;
+            });
+            actor.equipmentMaterials.forEach(value => {
+                const base = new Three.Color(value.userData.baseColor ?? 0x78909c);
+                value.color.copy(online ? base : base.lerp(gray, 0.82));
+                value.opacity = online ? (value.userData.baseOpacity ?? 1) : 0.68;
+            });
         }
 
         function applyPlayerVisibility(actor) {
@@ -1480,6 +1542,7 @@
             actorScene.remove(actor.offlineAnchor);
             clearEquipment(actor);
             actor.model.traverse(object => object.geometry?.dispose());
+            actor.graySkinTexture?.dispose();
             actor.baseMaterial.dispose();
             actor.overlayMaterial.dispose();
             actor.label.remove();
