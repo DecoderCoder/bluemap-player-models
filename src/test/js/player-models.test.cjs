@@ -14,7 +14,7 @@ const {
     firstAnimationFrame,
     grayscaleRgba,
     inventoryOrder,
-    interpolationProgress,
+    interpolationSpeed,
     itemVisualKey,
     mapAssetUrl,
     minecraftSkinUrl,
@@ -65,11 +65,10 @@ assert.equal(
 assert.equal(minecraftSkinUrl("https://example.com/texture/abcdef"), null);
 assert.equal(normalizeInterval(5000), 5000);
 assert.equal(normalizeInterval(0), 1000);
-assert.equal(interpolationProgress(-1, 1000), 0);
-assert.equal(interpolationProgress(250, 1000), 0.25);
-assert.equal(interpolationProgress(500, 1000), 0.5);
-assert.equal(interpolationProgress(750, 1000), 0.75);
-assert.equal(interpolationProgress(2000, 1000), 1);
+assert.equal(interpolationSpeed(10, 1000), 0.01);
+assert.equal(interpolationSpeed(2, 1000), 0.002);
+assert.equal(interpolationSpeed(-1, 1000), 0);
+assert.equal(interpolationSpeed(10, 0), 10);
 assert.deepEqual(splitId("minecraft:diamond_sword"), {
     namespace: "minecraft",
     path: "diamond_sword"

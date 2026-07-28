@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.4";
+    const VERSION = "1.2.5";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
@@ -51,9 +51,8 @@
         return REFRESH_INTERVALS.includes(interval) ? interval : 1000;
     };
 
-    const interpolationProgress = (elapsed, duration) => {
-        return Math.max(0, Math.min(1, elapsed / Math.max(1, duration)));
-    };
+    const interpolationSpeed = (distance, interval) =>
+        Math.max(0, distance) / Math.max(1, interval);
 
     const splitId = id => {
         const match = /^([a-z0-9_.-]+):([a-z0-9_./-]+)$/.exec(id || "");
@@ -315,7 +314,7 @@
             firstAnimationFrame,
             grayscaleRgba,
             inventoryOrder,
-            interpolationProgress,
+            interpolationSpeed,
             itemVisualKey,
             mapAssetUrl,
             minecraftSkinUrl,
@@ -1193,10 +1192,8 @@
                 model: new Three.Group(),
                 positionAnchor: new Three.Group(),
                 target: initialPosition.clone(),
-                motionFrom: initialPosition.clone(),
-                motionStartedAt: performance.now(),
-                motionDuration: settings.playerRefreshMs,
-                motionDistance: 0,
+                sampledAt: Number(data.lastSeen) || 0,
+                motionSpeed: 0,
                 targetYaw: -Three.MathUtils.degToRad(data.yaw || 0),
                 baseMaterial: material(0x78909c),
                 overlayMaterial: material(0xffffff),
@@ -1380,12 +1377,17 @@
         }
 
         function updatePlayer(actor, data) {
+            const previousSampleAt = actor.sampledAt;
             actor.data = data;
-            actor.motionFrom.copy(actor.positionAnchor.position);
             actor.target.set(data.x, data.y, data.z);
-            actor.motionStartedAt = performance.now();
-            actor.motionDuration = settings.playerRefreshMs;
-            actor.motionDistance = actor.motionFrom.distanceToSquared(actor.target);
+            actor.sampledAt = Number(data.lastSeen) || previousSampleAt;
+            const sampleInterval = actor.sampledAt > previousSampleAt
+                ? actor.sampledAt - previousSampleAt
+                : settings.playerRefreshMs;
+            actor.motionSpeed = interpolationSpeed(
+                actor.positionAnchor.position.distanceTo(actor.target),
+                sampleInterval
+            );
             actor.targetYaw = -Three.MathUtils.degToRad(data.yaw || 0);
             actor.followMarker.name = data.name;
             actor.lookIndicator.position.y = data.crouching ? 1.27 : 1.62;
@@ -2143,7 +2145,8 @@
         }
 
         function animate(event) {
-            const delta = Math.min(event.detail?.delta || 50, 100);
+            const frameDelta = Math.max(0, event.detail?.delta || 50);
+            const delta = Math.min(frameDelta, 100);
             const blend = 1 - Math.pow(0.001, delta / 1000);
             const now = performance.now();
             let changed = false;
@@ -2154,17 +2157,16 @@
                     applyPlayerVisibility(actor);
                 }
 
-                const wasMoving = actor.positionAnchor.position.distanceToSquared(actor.target) > 0.000001;
-                const progress = interpolationProgress(
-                    now - actor.motionStartedAt,
-                    actor.motionDuration
-                );
-                actor.positionAnchor.position.lerpVectors(
-                    actor.motionFrom,
-                    actor.target,
-                    progress
-                );
-                changed ||= wasMoving;
+                const remaining = actor.positionAnchor.position.distanceTo(actor.target);
+                const moving = remaining > 0.001;
+                if (moving) {
+                    const step = actor.motionSpeed * frameDelta;
+                    actor.positionAnchor.position.lerp(
+                        actor.target,
+                        Math.min(1, step / remaining)
+                    );
+                    changed = true;
+                }
 
                 const turn = Math.atan2(
                     Math.sin(actor.targetYaw - actor.model.rotation.y),
@@ -2190,8 +2192,7 @@
 
                 const walking = settings.animatePlayers
                     && actor.data.online
-                    && (actor.data.moving
-                        || (actor.motionDistance > 0.000001 && progress < 1));
+                    && (actor.data.moving || moving);
                 const swing = walking ? Math.sin(now * 0.012) * 0.72 : 0;
                 actor.rightArm.rotation.x += (swing - actor.rightArm.rotation.x) * blend;
                 actor.leftArm.rotation.x += (-swing - actor.leftArm.rotation.x) * blend;
