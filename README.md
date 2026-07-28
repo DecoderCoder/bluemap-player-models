@@ -56,7 +56,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.3.1.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.3.2.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 
@@ -77,22 +77,34 @@ Real-time movement is disabled by default. Turn on the `BETA` switch in the
 Player Models settings to use it; normal JSON polling remains active for
 metadata and automatic fallback.
 
-The WebSocket backend listens on `127.0.0.1:8101`. To serve it on the same
-public port as BlueMap, route `/bluemap-player-models/ws` through the reverse
-proxy already serving BlueMap. For nginx:
+The WebSocket backend listens on `127.0.0.1:8101`. BlueMap's built-in server
+cannot attach it to the port BlueMap already owns. To use the same public port,
+let a reverse proxy own that port, move BlueMap's built-in listener to a private
+port such as `127.0.0.1:8102`, and route both services. For nginx:
 
 ```nginx
-location = /bluemap-player-models/ws {
-    proxy_pass http://127.0.0.1:8101;
-    proxy_http_version 1.1;
-    proxy_set_header Host $http_host;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
+server {
+    listen 8100;
+
+    location = /bluemap-player-models/ws {
+        proxy_pass http://127.0.0.1:8101;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8102;
+        proxy_set_header Host $http_host;
+    }
 }
 ```
 
 If BlueMap is private, repeat its authentication and access-control directives
 inside this exact location; rules in a sibling BlueMap location do not apply.
+Without the WebSocket route, BETA makes one connection attempt and keeps using
+polling.
 Set a different backend with the JVM options
 `-Dbluemap-player-models.websocket-address=127.0.0.1` and
 `-Dbluemap-player-models.websocket-port=8101`. Keep the listener private and

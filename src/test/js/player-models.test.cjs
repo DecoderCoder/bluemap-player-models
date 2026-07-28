@@ -3,7 +3,10 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 global.__BPM_TEST__ = true;
-vm.runInThisContext(fs.readFileSync("src/main/resources/web/player-models.js", "utf8"));
+const source = fs.readFileSync("src/main/resources/web/player-models.js", "utf8");
+vm.runInThisContext(source);
+assert.doesNotMatch(source, /playerheads\/|minecraft\/assets\/|pending/);
+assert.match(source, /if \(wasConnected\) retryRealtime\(token\);/);
 
 const {
     armorTextureKey,

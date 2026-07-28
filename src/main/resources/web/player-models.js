@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.3.1";
+    const VERSION = "1.3.2";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const PLAYER_SOCKET_PATH = "/bluemap-player-models/ws";
@@ -436,6 +436,7 @@
         let realtimeSocket = null;
         let realtimeRetryTimer = null;
         let realtimeConnected = false;
+        let realtimeUnavailable = false;
         let selectedPlayerId = null;
         let lastStatus = "";
         let resourceManifest = {generation: VERSION, models: {}, textures: {}, metadata: {}};
@@ -497,7 +498,7 @@
                 ["offlinePlayers", "Offline players", "Keep logout positions in gray"],
                 ["entities", "Entities", "Show loaded non-player entities"],
                 ["labels", "Player labels", "Show skin, name, and held item"],
-                ["realTimePlayers", "BETA", "Stream online-player movement in real time"]
+                ["realTimePlayers", "BETA", "Real time; requires a WebSocket reverse proxy"]
             ];
             const list = ui.querySelector("#bpm-settings-list");
             for (const [key, label, detail] of definitions) {
@@ -655,12 +656,7 @@
         }
 
         function textureUrl(resource) {
-            const exported = resourceObjectUrl("textures", resource);
-            if (exported) return exported;
-            const id = splitId(resource);
-            if (!id) return null;
-            const path = id.path.split("/").map(encodeURIComponent).join("/");
-            return `${addonRoot}minecraft/assets/${encodeURIComponent(id.namespace)}/textures/${path}.png`;
+            return resourceObjectUrl("textures", resource);
         }
 
         function modelUrl(resource) {
@@ -1204,11 +1200,7 @@
             head.className = "bpm-player-head";
             head.alt = "";
             head.draggable = false;
-            head.src = currentAssetUrl(`playerheads/${data.uuid}.png`)
-                || new URL("assets/steve.png", document.baseURI).href;
-            head.addEventListener("error", () => {
-                head.src = new URL("assets/steve.png", document.baseURI).href;
-            }, {once: true});
+            head.src = new URL("assets/steve.png", document.baseURI).href;
             text.textContent = data.name;
             held.className = "bpm-player-held";
             held.alt = "";
@@ -1406,16 +1398,10 @@
             if (actor.removed) return;
             const published = currentAssetUrl(actor.data.skin);
             const source = minecraftSkinUrl(actor.data.skinUrl);
-            const fingerprint = encodeURIComponent(actor.data.skin || source || "pending");
-            const cached = new URL(
-                `skins/${encodeURIComponent(actor.data.uuid)}.png?bpm=${VERSION}-${fingerprint}`,
-                addonRoot
-            ).href;
             let texture = null;
             for (const url of [...new Set([
                 published ? `${published}?bpm=${VERSION}` : null,
-                source,
-                cached
+                source
             ].filter(Boolean))]) {
                 texture = await loadUrlTexture(url);
                 if (texture || actor.removed) break;
@@ -1443,7 +1429,7 @@
             try {
                 actor.labelHead.src = skinHeadIcon(texture.image) || actor.labelHead.src;
             } catch {
-                // Keep the server-published head if the browser disallows canvas extraction.
+                // Keep the fallback head if the browser disallows canvas extraction.
             }
             actor.skinReady = true;
             updateTone(actor);
@@ -2157,12 +2143,16 @@
                 });
             }
             updateCounts();
-            setStatus(
-                "ok",
-                realtimeConnected
-                    ? "Connected - BETA real-time"
-                    : `Connected - updated ${new Date(payload.updatedAt || Date.now()).toLocaleTimeString()}`
-            );
+            if (realtimeConnected) {
+                setStatus("ok", "Connected - BETA real-time");
+            } else if (settings.realTimePlayers && realtimeUnavailable) {
+                setStatus("waiting", "BETA unavailable - check proxy; polling continues");
+            } else {
+                setStatus(
+                    "ok",
+                    `Connected - updated ${new Date(payload.updatedAt || Date.now()).toLocaleTimeString()}`
+                );
+            }
             app.mapViewer.redraw();
         }
 
@@ -2172,9 +2162,13 @@
             const socket = realtimeSocket;
             realtimeSocket = null;
             const wasConnected = realtimeConnected;
+            const wasUnavailable = realtimeUnavailable;
             realtimeConnected = false;
+            realtimeUnavailable = false;
             socket?.close();
-            if (wasConnected) setStatus("waiting", "BETA disabled - polling continues");
+            if (wasConnected || wasUnavailable) {
+                setStatus("waiting", "BETA disabled - polling continues");
+            }
         }
 
         function retryRealtime(token) {
@@ -2195,10 +2189,12 @@
 
             const token = generation;
             let socket;
+            realtimeUnavailable = false;
             try {
                 socket = new window.WebSocket(playerSocketUrl(window.location.href));
             } catch {
-                retryRealtime(token);
+                realtimeUnavailable = true;
+                setStatus("waiting", "BETA unavailable - check proxy; polling continues");
                 return;
             }
             realtimeSocket = socket;
@@ -2210,9 +2206,7 @@
                     socket.close();
                     return;
                 }
-                realtimeConnected = true;
                 socket.send(JSON.stringify({mapId}));
-                setStatus("ok", "Connected - BETA real-time");
             });
             socket.addEventListener("message", event => {
                 if (socket !== realtimeSocket || token !== generation) return;
@@ -2225,6 +2219,9 @@
                         return;
                     }
 
+                    realtimeConnected = true;
+                    realtimeUnavailable = false;
+                    setStatus("ok", "Connected - BETA real-time");
                     let changed = false;
                     for (const data of payload.players) {
                         const actor = players.get(data?.uuid);
@@ -2249,10 +2246,12 @@
             socket.addEventListener("error", () => socket.close());
             socket.addEventListener("close", () => {
                 if (socket !== realtimeSocket) return;
+                const wasConnected = realtimeConnected;
                 realtimeSocket = null;
                 realtimeConnected = false;
-                setStatus("waiting", "BETA unavailable - polling continues");
-                retryRealtime(token);
+                realtimeUnavailable = true;
+                setStatus("waiting", "BETA unavailable - check proxy; polling continues");
+                if (wasConnected) retryRealtime(token);
             });
         }
 
