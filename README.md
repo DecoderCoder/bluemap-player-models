@@ -5,8 +5,8 @@ models and loaded entities to the map.
 
 ## Features
 
-- Skin-textured 3D player models attached to BlueMap's live player markers
-- Walking animation, head pitch, and BlueMap's smooth position updates
+- Skin-textured 3D player models on interval-synchronized position anchors
+- Walking animation, head pitch, smooth follow, and a followed player's look ray
 - Extracted vanilla, mod, and configured resource-pack textures and model JSON
 - JSON item models for held items and icons, including layers, block elements,
   parent inheritance, damage/custom-model-data overrides, and common item tints
@@ -51,7 +51,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.2.1.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.2.2.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 

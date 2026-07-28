@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.1";
+    const VERSION = "1.2.2";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
@@ -36,6 +36,13 @@
     const normalizeInterval = value => {
         const interval = Number(value);
         return REFRESH_INTERVALS.includes(interval) ? interval : 1000;
+    };
+
+    const interpolationProgress = (elapsed, duration) => {
+        const progress = Math.max(0, Math.min(1, elapsed / Math.max(1, duration)));
+        return progress < 0.5
+            ? 4 * progress * progress * progress
+            : 1 - Math.pow(-2 * progress + 2, 3) / 2;
     };
 
     const splitId = id => {
@@ -298,6 +305,7 @@
             firstAnimationFrame,
             grayscaleRgba,
             inventoryOrder,
+            interpolationProgress,
             itemVisualKey,
             mapAssetUrl,
             modelOverrideMatches,
@@ -1168,11 +1176,16 @@
         }
 
         function createPlayer(data) {
+            const initialPosition = new Three.Vector3(data.x, data.y, data.z);
             const actor = {
                 data,
                 model: new Three.Group(),
-                offlineAnchor: new Three.Group(),
-                target: new Three.Vector3(data.x, data.y, data.z),
+                positionAnchor: new Three.Group(),
+                target: initialPosition.clone(),
+                motionFrom: initialPosition.clone(),
+                motionStartedAt: performance.now(),
+                motionDuration: settings.playerRefreshMs,
+                motionDistance: 0,
                 targetYaw: -Three.MathUtils.degToRad(data.yaw || 0),
                 baseMaterial: material(0x78909c),
                 overlayMaterial: material(0xffffff),
@@ -1183,8 +1196,16 @@
                 heldMeshes: [],
                 equipmentKey: "",
                 nativeMarker: null,
-                lastNativePosition: new Three.Vector3(),
-                movementUntil: 0,
+                followMarker: {
+                    bpmPlayerId: data.uuid,
+                    playerUuid: data.uuid,
+                    name: data.name,
+                    foreign: false,
+                    position: initialPosition.clone().add(new Three.Vector3(0, 1.62, 0)),
+                    rotation: {yaw: data.yaw || 0, pitch: data.pitch || 0}
+                },
+                lookIndicator: new Three.Group(),
+                lookMaterials: [],
                 skinTexture: null,
                 graySkinTexture: null,
                 skinReady: false,
@@ -1194,7 +1215,7 @@
             actor.overlayMaterial.transparent = true;
             actor.overlayMaterial.depthWrite = false;
             actor.model.name = `player-model-${data.uuid}`;
-            actor.offlineAnchor.name = `offline-player-${data.uuid}`;
+            actor.positionAnchor.name = `player-${data.uuid}`;
             actor.model.onClick = event => {
                 if (event.data.doubleTap) return false;
                 showPlayerPopup(actor);
@@ -1226,6 +1247,8 @@
             actor.leftLeg = addLimb(
                 actor, 4, 12, 4, [16, 48], [0, 48], [2 * PIXEL, 0.675, 0]
             );
+            actor.model.rotation.y = actor.targetYaw;
+            actor.head.rotation.x = Three.MathUtils.degToRad(data.pitch || 0);
 
             actor.label = createPlayerLabel(data);
             actor.labelHead = actor.label.querySelector(".bpm-player-head");
@@ -1233,9 +1256,42 @@
             actor.labelObject = createCss2DObject(actor.label);
             actor.labelObject.position.set(0, 2.05, 0);
             actor.model.add(actor.labelObject);
-            actor.offlineAnchor.position.copy(actor.target);
-            actor.offlineAnchor.add(actor.model);
-            actorScene.add(actor.offlineAnchor);
+
+            const lookLineMaterial = new Three.LineBasicMaterial({
+                color: 0x55c8ff,
+                transparent: true,
+                opacity: 0.9,
+                depthTest: false
+            });
+            const lookPointMaterial = new Three.MeshBasicMaterial({
+                color: 0xffffff,
+                transparent: true,
+                opacity: 0.95,
+                depthTest: false
+            });
+            const lookLine = new Three.Line(
+                new Three.BufferGeometry().setFromPoints([
+                    new Three.Vector3(),
+                    new Three.Vector3(0, 0, 4)
+                ]),
+                lookLineMaterial
+            );
+            const lookPoint = new Three.Mesh(
+                new Three.SphereGeometry(0.12, 8, 6),
+                lookPointMaterial
+            );
+            lookPoint.position.z = 4;
+            lookLine.renderOrder = lookPoint.renderOrder = 1000;
+            actor.lookMaterials.push(lookLineMaterial, lookPointMaterial);
+            actor.lookIndicator.name = `player-look-${data.uuid}`;
+            actor.lookIndicator.position.y = data.crouching ? 1.27 : 1.62;
+            actor.lookIndicator.rotation.order = "YXZ";
+            actor.lookIndicator.visible = false;
+            actor.lookIndicator.add(lookLine, lookPoint);
+
+            actor.positionAnchor.position.copy(actor.target);
+            actor.positionAnchor.add(actor.model, actor.lookIndicator);
+            actorScene.add(actor.positionAnchor);
             loadSkin(actor);
             updatePlayer(actor, data);
             return actor;
@@ -1295,35 +1351,27 @@
         }
 
         function bindPlayer(actor) {
-            if (!actor.data.online) {
-                clearNativeMarker(actor);
-                if (actor.model.parent !== actor.offlineAnchor) {
-                    actor.model.parent?.remove(actor.model);
-                    actor.offlineAnchor.add(actor.model);
-                }
-                actor.model.position.y = 0;
-                return;
-            }
-
-            const marker = findNativeMarker(actor.data.uuid);
+            const marker = actor.data.online ? findNativeMarker(actor.data.uuid) : null;
             if (marker !== actor.nativeMarker) {
                 clearNativeMarker(actor);
                 actor.nativeMarker = marker;
-                if (marker) {
-                    actor.model.parent?.remove(actor.model);
-                    marker.add(actor.model);
-                    actor.lastNativePosition.copy(marker.position);
-                }
             }
-            actor.model.position.y = -1.8 - (actor.data.crouching ? 0.16 : 0);
+            actor.model.position.y = actor.data.crouching ? -0.16 : 0;
         }
 
         function updatePlayer(actor, data) {
-            const wasOnline = actor.data.online;
             actor.data = data;
+            actor.motionFrom.copy(actor.positionAnchor.position);
             actor.target.set(data.x, data.y, data.z);
+            actor.motionStartedAt = performance.now();
+            actor.motionDuration = settings.playerRefreshMs;
+            actor.motionDistance = actor.motionFrom.distanceToSquared(actor.target);
             actor.targetYaw = -Three.MathUtils.degToRad(data.yaw || 0);
-            if (data.online || wasOnline) actor.offlineAnchor.position.copy(actor.target);
+            actor.followMarker.name = data.name;
+            actor.lookIndicator.position.y = data.crouching ? 1.27 : 1.62;
+            if (!data.online && isFollowing(actor)) {
+                app.mapViewer.controlsManager.controls?.stopFollowingPlayerMarker?.();
+            }
             updatePlayerLabel(actor);
 
             const equipmentKey = JSON.stringify([
@@ -1522,26 +1570,31 @@
         function applyPlayerVisibility(actor) {
             const show = settings.playerModels
                 && (actor.data.online || settings.offlinePlayers);
-            const onlineReady = !!actor.nativeMarker;
-            actor.model.visible = show && (!actor.data.online || onlineReady);
-            actor.offlineAnchor.visible = show && !actor.data.online;
+            actor.model.visible = show;
+            actor.positionAnchor.visible = show;
+            actor.lookIndicator.visible = show && actor.data.online && isFollowing(actor);
             actor.armorMeshes.forEach(mesh => mesh.visible = settings.armor);
             actor.heldMeshes.forEach(mesh => mesh.visible = settings.heldItems);
             actor.label.classList.toggle("bpm-hidden-label", !settings.labels);
             actor.nativeMarker?.element?.classList.toggle(
                 "bpm-model-ready",
-                show && onlineReady
+                show
             );
         }
 
         function removePlayer(actor) {
             actor.removed = true;
+            if (isFollowing(actor)) {
+                app.mapViewer.controlsManager.controls?.stopFollowingPlayerMarker?.();
+            }
             clearNativeMarker(actor);
             actor.model.parent?.remove(actor.model);
             actor.labelObject.parent?.remove(actor.labelObject);
-            actorScene.remove(actor.offlineAnchor);
+            actorScene.remove(actor.positionAnchor);
             clearEquipment(actor);
             actor.model.traverse(object => object.geometry?.dispose());
+            actor.lookIndicator.traverse(object => object.geometry?.dispose());
+            actor.lookMaterials.forEach(value => value.dispose());
             actor.graySkinTexture?.dispose();
             actor.baseMaterial.dispose();
             actor.overlayMaterial.dispose();
@@ -1749,6 +1802,11 @@
             app.mapViewer.redraw();
         }
 
+        function isFollowing(actor) {
+            return app.mapViewer.controlsManager.controls?.data?.followingPlayer?.bpmPlayerId
+                === actor.data.uuid;
+        }
+
         function openPopupAt(position, content) {
             const popup = app.popupMarker;
             if (!popup) return;
@@ -1762,9 +1820,7 @@
         function showPlayerPopup(actor) {
             selectedPlayerId = actor.data.uuid;
             const data = actor.data;
-            const position = actor.nativeMarker
-                ? actor.nativeMarker.position.clone()
-                : actor.offlineAnchor.position.clone().add(new Three.Vector3(0, 0.8, 0));
+            const position = actor.followMarker.position.clone();
             const subtitle = data.online
                 ? "Online"
                 : `Offline - ${formatLastSeen(data.lastSeen)}`;
@@ -1774,12 +1830,14 @@
                     app.popupMarker?.close();
                     openPanel("inventory", players.get(selectedPlayerId)?.data || data);
                 }),
-                popupButton("Center", () => centerOn(data))
+                popupButton("Center", () => centerOn(actor.followMarker.position))
             );
-            if (data.online && actor.nativeMarker) {
+            if (data.online) {
                 actions.append(popupButton("Follow", () => {
-                    app.mapViewer.controlsManager.controls?.followPlayerMarker?.(actor.nativeMarker);
+                    app.mapViewer.controlsManager.controls?.followPlayerMarker?.(actor.followMarker);
+                    applyPlayerVisibility(actor);
                     app.popupMarker?.close();
+                    app.mapViewer.redraw();
                 }));
             }
             openPopupAt(position, shell);
@@ -2068,23 +2126,22 @@
             let changed = false;
 
             players.forEach(actor => {
-                if (actor.data.online) {
-                    if (!actor.nativeMarker || actor.model.parent !== actor.nativeMarker) {
-                        bindPlayer(actor);
-                        applyPlayerVisibility(actor);
-                    }
-                    if (actor.nativeMarker) {
-                        const distance = actor.nativeMarker.position.distanceToSquared(actor.lastNativePosition);
-                        if (distance > 0.000001 && distance < 16) actor.movementUntil = now + 180;
-                        actor.lastNativePosition.copy(actor.nativeMarker.position);
-                        actor.targetYaw = -Three.MathUtils.degToRad(
-                            actor.nativeMarker.data.rotation?.yaw ?? actor.data.yaw ?? 0
-                        );
-                    }
-                } else {
-                    actor.offlineAnchor.position.lerp(actor.target, blend);
-                    changed ||= actor.offlineAnchor.position.distanceToSquared(actor.target) > 0.0001;
+                if (actor.data.online && !actor.nativeMarker) {
+                    bindPlayer(actor);
+                    applyPlayerVisibility(actor);
                 }
+
+                const wasMoving = actor.positionAnchor.position.distanceToSquared(actor.target) > 0.000001;
+                const progress = interpolationProgress(
+                    now - actor.motionStartedAt,
+                    actor.motionDuration
+                );
+                actor.positionAnchor.position.lerpVectors(
+                    actor.motionFrom,
+                    actor.target,
+                    progress
+                );
+                changed ||= wasMoving;
 
                 const turn = Math.atan2(
                     Math.sin(actor.targetYaw - actor.model.rotation.y),
@@ -2094,10 +2151,24 @@
                 actor.head.rotation.x += (
                     Three.MathUtils.degToRad(actor.data.pitch || 0) - actor.head.rotation.x
                 ) * blend;
+                actor.followMarker.position.copy(actor.positionAnchor.position);
+                actor.followMarker.position.y += actor.data.crouching ? 1.27 : 1.62;
+                actor.followMarker.rotation.yaw = -Three.MathUtils.radToDeg(actor.model.rotation.y);
+                actor.followMarker.rotation.pitch = Three.MathUtils.radToDeg(actor.head.rotation.x);
+                actor.lookIndicator.rotation.y = actor.model.rotation.y;
+                actor.lookIndicator.rotation.x = actor.head.rotation.x;
+                const following = isFollowing(actor);
+                if (actor.lookIndicator.visible !== following
+                    && settings.playerModels
+                    && actor.data.online) {
+                    actor.lookIndicator.visible = following;
+                    changed = true;
+                }
 
                 const walking = settings.animatePlayers
                     && actor.data.online
-                    && (actor.data.moving || now < actor.movementUntil);
+                    && (actor.data.moving
+                        || (actor.motionDistance > 0.000001 && progress < 1));
                 const swing = walking ? Math.sin(now * 0.012) * 0.72 : 0;
                 actor.rightArm.rotation.x += (swing - actor.rightArm.rotation.x) * blend;
                 actor.leftArm.rotation.x += (-swing - actor.leftArm.rotation.x) * blend;
