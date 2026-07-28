@@ -3,6 +3,8 @@ plugins {
     id 'net.minecraftforge.gradle' version '[6.0,6.2)'
 }
 
+jarJar.enable()
+
 version = mod_version
 group = mod_group_id
 
@@ -57,6 +59,13 @@ repositories {
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
     compileOnly "de.bluecolored.bluemap:BlueMapAPI:${bluemap_compile_api_version}"
+    minecraftLibrary(group: 'org.java-websocket', name: 'Java-WebSocket', version: '1.6.0') {
+        transitive = false
+    }
+    jarJar(group: 'org.java-websocket', name: 'Java-WebSocket', version: '[1.6,2.0)') {
+        jarJar.pin(it, '1.6.0')
+        transitive = false
+    }
 }
 
 tasks.named('processResources', ProcessResources).configure {
@@ -98,6 +107,7 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 tasks.named('jar', Jar).configure {
+    archiveClassifier = 'slim'
     from 'LICENSE'
     manifest {
         attributes(
@@ -108,4 +118,9 @@ tasks.named('jar', Jar).configure {
         )
     }
     finalizedBy 'reobfJar'
+}
+
+tasks.named('jarJar').configure {
+    archiveClassifier = ''
+    finalizedBy 'reobfJarJar'
 }

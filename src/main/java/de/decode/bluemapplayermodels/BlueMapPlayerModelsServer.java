@@ -107,7 +107,7 @@ final class BlueMapPlayerModelsServer {
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
     private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
-    private static final String WEB_ASSET_VERSION = "1.3.0";
+    private static final String WEB_ASSET_VERSION = "1.3.1";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
     private static final int RESOURCE_MANIFEST_FORMAT = 1;
     private static final int MAX_SKIN_BYTES = 2_000_000;
@@ -139,6 +139,7 @@ final class BlueMapPlayerModelsServer {
     private volatile Map<String, List<EntityData>> entitiesByWorld = Map.of();
     private volatile Path skinRoot;
     private MinecraftServer server;
+    private PlayerWebSocketServer playerWebSocketServer;
     private Path stateFile;
     private int ticks;
 
@@ -162,6 +163,8 @@ final class BlueMapPlayerModelsServer {
         stateFile = server.getWorldPath(LevelResource.ROOT)
             .resolve("data")
             .resolve(ASSET_ROOT + ".json");
+        playerWebSocketServer = new PlayerWebSocketServer();
+        playerWebSocketServer.start();
         loadState();
         importStoredPlayers();
         updateOnlinePlayers();
@@ -174,6 +177,10 @@ final class BlueMapPlayerModelsServer {
         event.getServer().getPlayerList().getPlayers().forEach(player -> snapshot(player, false));
         saveState();
         entitiesByWorld = Map.of();
+        if (playerWebSocketServer != null) {
+            playerWebSocketServer.close();
+            playerWebSocketServer = null;
+        }
         server = null;
         skinExecutor.shutdownNow();
         publicationExecutor.shutdown();
@@ -197,7 +204,12 @@ final class BlueMapPlayerModelsServer {
 
     @SubscribeEvent
     public void onServerTick(TickEvent.ServerTickEvent event) {
-        if (event.phase != TickEvent.Phase.END || server == null || ++ticks % 20 != 0) {
+        if (event.phase != TickEvent.Phase.END || server == null) {
+            return;
+        }
+
+        broadcastRealtimePlayers();
+        if (++ticks % 20 != 0) {
             return;
         }
 
@@ -244,6 +256,55 @@ final class BlueMapPlayerModelsServer {
     private void updateOnlinePlayers() {
         if (server != null) {
             server.getPlayerList().getPlayers().forEach(player -> snapshot(player, true));
+        }
+    }
+
+    private void broadcastRealtimePlayers() {
+        PlayerWebSocketServer socket = playerWebSocketServer;
+        MinecraftServer currentServer = server;
+        BlueMapAPI api = blueMap;
+        if (socket == null || currentServer == null || api == null) {
+            return;
+        }
+
+        Set<String> subscriptions = socket.subscribedMaps();
+        if (subscriptions.isEmpty()) {
+            return;
+        }
+
+        long updatedAt = System.currentTimeMillis();
+        Map<String, List<LivePlayerData>> playersByWorld = new HashMap<>();
+        for (ServerPlayer player : currentServer.getPlayerList().getPlayers()) {
+            if (!api.getWebApp().getPlayerVisibility(player.getUUID())) {
+                continue;
+            }
+            api.getWorld(player.serverLevel()).ifPresent(world ->
+                playersByWorld.computeIfAbsent(world.getId(), ignored -> new ArrayList<>()).add(
+                    new LivePlayerData(
+                        player.getStringUUID(),
+                        player.getX(),
+                        player.getY(),
+                        player.getZ(),
+                        player.getYHeadRot(),
+                        player.getXRot(),
+                        player.getDeltaMovement().horizontalDistanceSqr() > 0.0004,
+                        player.isCrouching()
+                    )
+                )
+            );
+        }
+
+        for (BlueMapMap map : api.getMaps()) {
+            if (subscriptions.contains(map.getId())) {
+                socket.broadcast(
+                    map.getId(),
+                    GSON.toJson(new LivePayload(
+                        updatedAt,
+                        map.getId(),
+                        playersByWorld.getOrDefault(map.getWorld().getId(), List.of())
+                    ))
+                );
+            }
         }
     }
 
@@ -1547,6 +1608,19 @@ final class BlueMapPlayerModelsServer {
     private record Publication(AssetStorage storage, byte[] json) {}
 
     private record Payload(long updatedAt, List<PlayerData> players, List<EntityData> entities) {}
+
+    private record LivePayload(long updatedAt, String mapId, List<LivePlayerData> players) {}
+
+    private record LivePlayerData(
+        String uuid,
+        double x,
+        double y,
+        double z,
+        float yaw,
+        float pitch,
+        boolean moving,
+        boolean crouching
+    ) {}
 
     private record State(List<PlayerData> players) {}
 

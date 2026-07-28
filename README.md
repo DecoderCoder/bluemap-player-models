@@ -21,6 +21,7 @@ models and loaded entities to the map.
 - BlueMap-styled, responsive settings and inventory side panels
 - Stable inventory slots that do not blink when live data refreshes
 - Independent 1-30 second player and entity display-update intervals
+- Opt-in BETA real-time online-player movement with polling fallback
 
 The add-on reads a deterministic server-visible client-resource stack:
 BlueMap's downloaded vanilla client jar, loaded mod resources, then entries in
@@ -55,7 +56,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.3.0.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.3.1.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 
@@ -69,6 +70,33 @@ Full skins use the signed texture URL already present in each online player's
 profile, with BlueMap's configured skin provider as a fallback. Fingerprinted
 PNGs are cached through every map's BlueMap asset storage. Skin heads are cut
 from the same full skin in the browser, so the label and 3D model stay in sync.
+
+## BETA real-time updates
+
+Real-time movement is disabled by default. Turn on the `BETA` switch in the
+Player Models settings to use it; normal JSON polling remains active for
+metadata and automatic fallback.
+
+The WebSocket backend listens on `127.0.0.1:8101`. To serve it on the same
+public port as BlueMap, route `/bluemap-player-models/ws` through the reverse
+proxy already serving BlueMap. For nginx:
+
+```nginx
+location = /bluemap-player-models/ws {
+    proxy_pass http://127.0.0.1:8101;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+If BlueMap is private, repeat its authentication and access-control directives
+inside this exact location; rules in a sibling BlueMap location do not apply.
+Set a different backend with the JVM options
+`-Dbluemap-player-models.websocket-address=127.0.0.1` and
+`-Dbluemap-player-models.websocket-port=8101`. Keep the listener private and
+expose only the proxied path.
 
 ## Privacy
 

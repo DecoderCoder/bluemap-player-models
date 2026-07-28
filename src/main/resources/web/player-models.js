@@ -1,11 +1,15 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.3.0";
+    const VERSION = "1.3.1";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
+    const PLAYER_SOCKET_PATH = "/bluemap-player-models/ws";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
     const REFRESH_INTERVALS = [1000, 2000, 5000, 10000, 30000];
+    const PLAYER_MOTION_FIELDS = [
+        "x", "y", "z", "yaw", "pitch", "moving", "crouching", "lastSeen"
+    ];
 
     const boxRegions = (x, y, width, height, depth) => [
         [x + depth + width, y + depth, depth, height],
@@ -53,6 +57,23 @@
 
     const interpolationSpeed = (distance, interval) =>
         Math.max(0, distance) / Math.max(1, interval);
+
+    const playerSocketUrl = href => {
+        const url = new URL(PLAYER_SOCKET_PATH, href);
+        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        return url.href;
+    };
+
+    const mergePlayerMotion = (current, incoming, sampledAt) => {
+        if (!current || Number(incoming?.lastSeen) >= Number(sampledAt || 0)) {
+            return incoming;
+        }
+        const merged = {...incoming};
+        PLAYER_MOTION_FIELDS.forEach(field => {
+            if (field in current) merged[field] = current[field];
+        });
+        return merged;
+    };
 
     const splitId = id => {
         const match = /^([a-z0-9_.-]+):([a-z0-9_./-]+)$/.exec(id || "");
@@ -370,6 +391,8 @@
             normalizeResourceId,
             normalizeInterval,
             playerDataUrl,
+            playerSocketUrl,
+            mergePlayerMotion,
             resolveTextureReference,
             syncSlotNodes,
             splitId
@@ -410,6 +433,9 @@
         let refreshTimer = null;
         let mapId = null;
         let generation = 0;
+        let realtimeSocket = null;
+        let realtimeRetryTimer = null;
+        let realtimeConnected = false;
         let selectedPlayerId = null;
         let lastStatus = "";
         let resourceManifest = {generation: VERSION, models: {}, textures: {}, metadata: {}};
@@ -441,6 +467,7 @@
                 offlinePlayers: true,
                 entities: true,
                 labels: true,
+                realTimePlayers: false,
                 playerRefreshMs: 1000,
                 entityRefreshMs: 1000
             };
@@ -469,7 +496,8 @@
                 ["armor", "Player armor", "Show equipped armor layers"],
                 ["offlinePlayers", "Offline players", "Keep logout positions in gray"],
                 ["entities", "Entities", "Show loaded non-player entities"],
-                ["labels", "Player labels", "Show skin, name, and held item"]
+                ["labels", "Player labels", "Show skin, name, and held item"],
+                ["realTimePlayers", "BETA", "Stream online-player movement in real time"]
             ];
             const list = ui.querySelector("#bpm-settings-list");
             for (const [key, label, detail] of definitions) {
@@ -1447,6 +1475,7 @@
 
         function updatePlayer(actor, data) {
             const previousSampleAt = actor.sampledAt;
+            data = mergePlayerMotion(actor.data, data, previousSampleAt);
             actor.data = data;
             actor.target.set(data.x, data.y, data.z);
             actor.sampledAt = Number(data.lastSeen) || previousSampleAt;
@@ -2074,10 +2103,15 @@
         function reconcile(payload, update) {
             if (update.players) {
                 const incomingPlayers = new Set();
-                for (const data of Array.isArray(payload.players) ? payload.players : []) {
-                    if (!data?.uuid) continue;
-                    incomingPlayers.add(data.uuid);
-                    const existing = players.get(data.uuid);
+                for (const incoming of Array.isArray(payload.players) ? payload.players : []) {
+                    if (!incoming?.uuid) continue;
+                    incomingPlayers.add(incoming.uuid);
+                    const existing = players.get(incoming.uuid);
+                    const data = mergePlayerMotion(
+                        existing?.data,
+                        incoming,
+                        existing?.sampledAt
+                    );
                     if (existing
                         && existing.data.slim === data.slim
                         && existing.data.skin === data.skin
@@ -2123,8 +2157,103 @@
                 });
             }
             updateCounts();
-            setStatus("ok", `Connected - updated ${new Date(payload.updatedAt || Date.now()).toLocaleTimeString()}`);
+            setStatus(
+                "ok",
+                realtimeConnected
+                    ? "Connected - BETA real-time"
+                    : `Connected - updated ${new Date(payload.updatedAt || Date.now()).toLocaleTimeString()}`
+            );
             app.mapViewer.redraw();
+        }
+
+        function closeRealtime() {
+            clearTimeout(realtimeRetryTimer);
+            realtimeRetryTimer = null;
+            const socket = realtimeSocket;
+            realtimeSocket = null;
+            const wasConnected = realtimeConnected;
+            realtimeConnected = false;
+            socket?.close();
+            if (wasConnected) setStatus("waiting", "BETA disabled - polling continues");
+        }
+
+        function retryRealtime(token) {
+            if (realtimeRetryTimer || token !== generation || !settings.realTimePlayers) return;
+            realtimeRetryTimer = setTimeout(() => {
+                realtimeRetryTimer = null;
+                connectRealtime();
+            }, 5000);
+        }
+
+        function connectRealtime() {
+            if (!settings.realTimePlayers
+                || !mapId
+                || realtimeSocket
+                || !("WebSocket" in window)) {
+                return;
+            }
+
+            const token = generation;
+            let socket;
+            try {
+                socket = new window.WebSocket(playerSocketUrl(window.location.href));
+            } catch {
+                retryRealtime(token);
+                return;
+            }
+            realtimeSocket = socket;
+
+            socket.addEventListener("open", () => {
+                if (socket !== realtimeSocket
+                    || token !== generation
+                    || !settings.realTimePlayers) {
+                    socket.close();
+                    return;
+                }
+                realtimeConnected = true;
+                socket.send(JSON.stringify({mapId}));
+                setStatus("ok", "Connected - BETA real-time");
+            });
+            socket.addEventListener("message", event => {
+                if (socket !== realtimeSocket || token !== generation) return;
+                try {
+                    const payload = JSON.parse(event.data);
+                    const sampledAt = Number(payload?.updatedAt);
+                    if (payload?.mapId !== mapId
+                        || !Number.isFinite(sampledAt)
+                        || !Array.isArray(payload.players)) {
+                        return;
+                    }
+
+                    let changed = false;
+                    for (const data of payload.players) {
+                        const actor = players.get(data?.uuid);
+                        if (!actor?.data.online
+                            || ![data.x, data.y, data.z, data.yaw, data.pitch].every(Number.isFinite)) {
+                            continue;
+                        }
+                        updatePlayer(actor, {
+                            ...actor.data,
+                            ...data,
+                            moving: !!data.moving,
+                            crouching: !!data.crouching,
+                            lastSeen: sampledAt
+                        });
+                        changed = true;
+                    }
+                    if (changed) app.mapViewer.redraw();
+                } catch {
+                    // Ignore malformed frames and keep the polling fallback active.
+                }
+            });
+            socket.addEventListener("error", () => socket.close());
+            socket.addEventListener("close", () => {
+                if (socket !== realtimeSocket) return;
+                realtimeSocket = null;
+                realtimeConnected = false;
+                setStatus("waiting", "BETA unavailable - polling continues");
+                retryRealtime(token);
+            });
         }
 
         function queueNextRefresh() {
@@ -2195,6 +2324,7 @@
             const nextMapId = app.mapViewer.map?.data?.id;
             mapId = nextMapId;
             generation++;
+            closeRealtime();
             refreshRequest?.abort();
             refreshRequest = null;
             clearTimeout(refreshTimer);
@@ -2214,9 +2344,14 @@
                 if (token === generation) app.mapViewer.redraw();
             });
             refresh(true);
+            connectRealtime();
         }
 
         function applySettings(changed) {
+            if (changed === "realTimePlayers") {
+                if (settings.realTimePlayers) connectRealtime();
+                else closeRealtime();
+            }
             players.forEach(applyPlayerVisibility);
             if (!settings.entities) {
                 entities.forEach(removeEntity);

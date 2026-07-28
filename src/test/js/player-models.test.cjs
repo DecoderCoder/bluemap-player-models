@@ -18,11 +18,13 @@ const {
     interpolationSpeed,
     itemVisualKey,
     mapAssetUrl,
+    mergePlayerMotion,
     minecraftSkinUrl,
     modelOverrideMatches,
     normalizeResourceId,
     normalizeInterval,
     playerDataUrl,
+    playerSocketUrl,
     resolveTextureReference,
     syncSlotNodes,
     splitId
@@ -46,6 +48,42 @@ assert.equal(
 assert.equal(
     playerDataUrl({dataUrl: "maps/world/"}),
     "maps/world/assets/bluemap-player-models/players.json"
+);
+assert.equal(
+    playerSocketUrl("http://example.test/maps/world"),
+    "ws://example.test/bluemap-player-models/ws"
+);
+assert.equal(
+    playerSocketUrl("https://example.test:8443/maps/world"),
+    "wss://example.test:8443/bluemap-player-models/ws"
+);
+const currentMotion = {
+    x: 9,
+    y: 8,
+    z: 7,
+    yaw: 6,
+    pitch: 5,
+    moving: true,
+    crouching: true,
+    lastSeen: 200
+};
+assert.deepEqual(
+    mergePlayerMotion(currentMotion, {
+        x: 1,
+        y: 2,
+        z: 3,
+        yaw: 4,
+        pitch: 5,
+        moving: false,
+        crouching: false,
+        lastSeen: 100,
+        inventory: ["new"]
+    }, 200),
+    {...currentMotion, inventory: ["new"]}
+);
+assert.deepEqual(
+    mergePlayerMotion(currentMotion, {...currentMotion, x: 10, lastSeen: 300}, 200),
+    {...currentMotion, x: 10, lastSeen: 300}
 );
 assert.equal(
     mapAssetUrl(
