@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.6";
+    const VERSION = "1.2.7";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
@@ -387,7 +387,6 @@
                 playerModels: true,
                 animatePlayers: true,
                 armor: true,
-                heldItems: true,
                 offlinePlayers: true,
                 entities: true,
                 labels: true,
@@ -417,7 +416,6 @@
                 ["playerModels", "3D player models", "Replace BlueMap's native player heads"],
                 ["animatePlayers", "Walking animation", "Animate player arms and legs"],
                 ["armor", "Player armor", "Show equipped armor layers"],
-                ["heldItems", "Held items", "Show main-hand and off-hand items"],
                 ["offlinePlayers", "Offline players", "Keep logout positions in gray"],
                 ["entities", "Entities", "Show loaded non-player entities"],
                 ["labels", "Player labels", "Show skin, name, and held item"]
@@ -1201,7 +1199,6 @@
                 equipmentMaterials: [],
                 equipmentMeshes: [],
                 armorMeshes: [],
-                heldMeshes: [],
                 equipmentKey: "",
                 nativeMarker: null,
                 followMarker: {
@@ -1396,12 +1393,7 @@
             }
             updatePlayerLabel(actor);
 
-            const equipmentKey = JSON.stringify([
-                !!data.leftHanded,
-                itemVisualKey(data.mainHand),
-                itemVisualKey(data.offHand),
-                ...(data.armor || []).map(itemVisualKey)
-            ]);
+            const equipmentKey = JSON.stringify((data.armor || []).map(itemVisualKey));
             if (actor.equipmentKey !== equipmentKey) {
                 actor.equipmentKey = equipmentKey;
                 rebuildEquipment(actor);
@@ -1423,7 +1415,6 @@
             actor.equipmentMeshes = [];
             actor.equipmentMaterials = [];
             actor.armorMeshes = [];
-            actor.heldMeshes = [];
         }
 
         function trackedEquipmentMaterial(actor, item, opacity = 1) {
@@ -1480,35 +1471,6 @@
             }
         }
 
-        function addHeldItem(actor, arm, item, left) {
-            const holder = new Three.Group();
-            holder.position.set(left ? -0.08 : 0.08, -0.58, -0.1);
-            holder.rotation.set(-0.25, left ? -0.25 : 0.25, left ? 0.22 : -0.22);
-            arm.add(holder);
-            actor.equipmentMeshes.push(holder);
-            actor.heldMeshes.push(holder);
-            const key = actor.equipmentKey;
-            resourceReady
-                .then(() => buildItemObject(
-                    item,
-                    left ? "thirdperson_lefthand" : "thirdperson_righthand"
-                ))
-                .then(build => {
-                    if (actor.removed || key !== actor.equipmentKey) {
-                        disposeItemObject(build);
-                        return;
-                    }
-                    holder.add(build.root);
-                    actor.equipmentMaterials.push(...build.materials);
-                    updateTone(actor);
-                    applyPlayerVisibility(actor);
-                    app.mapViewer.redraw();
-                })
-                .catch(error => {
-                    console.debug(`Failed to render held item ${item.id}`, error);
-                });
-        }
-
         function rebuildEquipment(actor) {
             clearEquipment(actor);
             const [head, chest, legs, feet] = actor.data.armor || [];
@@ -1538,14 +1500,6 @@
                 });
             }
 
-            const mainArm = actor.data.leftHanded ? actor.leftArm : actor.rightArm;
-            const offArm = actor.data.leftHanded ? actor.rightArm : actor.leftArm;
-            if (actor.data.mainHand) {
-                addHeldItem(actor, mainArm, actor.data.mainHand, actor.data.leftHanded);
-            }
-            if (actor.data.offHand) {
-                addHeldItem(actor, offArm, actor.data.offHand, !actor.data.leftHanded);
-            }
             applyPlayerVisibility(actor);
         }
 
@@ -1596,7 +1550,6 @@
             actor.positionAnchor.visible = show;
             actor.lookIndicator.visible = show && actor.data.online && isFollowing(actor);
             actor.armorMeshes.forEach(mesh => mesh.visible = settings.armor);
-            actor.heldMeshes.forEach(mesh => mesh.visible = settings.heldItems);
             actor.label.classList.toggle("bpm-hidden-label", !settings.labels);
             actor.nativeMarker?.element?.classList.toggle(
                 "bpm-model-ready",
