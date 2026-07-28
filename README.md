@@ -15,6 +15,7 @@ models and loaded entities to the map.
 - Click a player for Inventory, Center, and Follow actions
 - Gray offline players at their saved logout positions
 - Logout snapshots persisted in the world's `data` folder
+- Historical offline players imported from Minecraft's existing `playerdata`
 - Up to 128 loaded non-player entities per mapped world, with vanilla textures
   and simple 3D model families
 - BlueMap-styled, responsive settings and inventory side panels
@@ -51,7 +52,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.2.5.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.2.6.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 
@@ -59,7 +60,8 @@ The jar is safe if a modpack synchronizer also copies it to clients: its
 BlueMap integration is initialized only on a dedicated server.
 
 The add-on copies and registers versioned JavaScript/CSS through BlueMapAPI.
-Players appear after BlueMap has loaded a map and the player has joined once.
+Players appear after BlueMap has loaded a map. Existing logout positions are
+imported from Minecraft's player data when their dimension has a BlueMap map.
 Full skins use the signed texture URL already present in each online player's
 profile, with BlueMap's configured skin provider as a fallback. Fingerprinted
 PNGs are cached through every map's BlueMap asset storage. Skin heads are cut

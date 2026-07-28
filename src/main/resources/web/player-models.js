@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.5";
+    const VERSION = "1.2.6";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";

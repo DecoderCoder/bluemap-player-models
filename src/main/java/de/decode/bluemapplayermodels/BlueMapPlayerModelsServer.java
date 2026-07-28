@@ -10,8 +10,11 @@ import de.bluecolored.bluemap.api.AssetStorage;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
 import net.minecraft.SharedConstants;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtIo;
 import net.minecraft.nbt.Tag;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -36,6 +39,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.item.SpawnEggItem;
 import net.minecraft.world.item.alchemy.PotionUtils;
 import net.minecraft.world.item.armortrim.ArmorTrim;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.storage.LevelResource;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.TickEvent;
@@ -63,6 +67,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -74,6 +79,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HexFormat;
@@ -101,7 +107,7 @@ final class BlueMapPlayerModelsServer {
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
     private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
-    private static final String WEB_ASSET_VERSION = "1.2.5";
+    private static final String WEB_ASSET_VERSION = "1.2.6";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
     private static final int RESOURCE_MANIFEST_FORMAT = 1;
     private static final int MAX_SKIN_BYTES = 2_000_000;
@@ -157,6 +163,7 @@ final class BlueMapPlayerModelsServer {
             .resolve("data")
             .resolve(ASSET_ROOT + ".json");
         loadState();
+        importStoredPlayers();
         updateOnlinePlayers();
         updateEntities();
         publish();
@@ -214,6 +221,7 @@ final class BlueMapPlayerModelsServer {
             publishedSkins.clear();
             skinRetryAt.clear();
             blueMap = api;
+            importStoredPlayers();
             publish();
             LOGGER.info("BlueMap Player Models {} web assets installed", WEB_ASSET_VERSION);
         } catch (IOException exception) {
@@ -234,6 +242,128 @@ final class BlueMapPlayerModelsServer {
     private void updateOnlinePlayers() {
         if (server != null) {
             server.getPlayerList().getPlayers().forEach(player -> snapshot(player, true));
+        }
+    }
+
+    private void importStoredPlayers() {
+        MinecraftServer currentServer = server;
+        BlueMapAPI api = blueMap;
+        if (currentServer == null || api == null) {
+            return;
+        }
+
+        Path directory = currentServer.getWorldPath(LevelResource.PLAYER_DATA_DIR);
+        if (!Files.isDirectory(directory)) {
+            return;
+        }
+
+        int imported = 0;
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(directory, "*.dat")) {
+            for (Path file : files) {
+                try {
+                    String filename = file.getFileName().toString();
+                    UUID uuid = UUID.fromString(filename.substring(0, filename.length() - 4));
+                    PlayerData data = storedPlayer(currentServer, api, uuid, file);
+                    PlayerData previous = players.get(uuid);
+                    if (data == null
+                        || (previous != null
+                            && (previous.online || previous.lastSeen >= data.lastSeen))) {
+                        continue;
+                    }
+                    if (previous != null) {
+                        if (data.name.equals(uuid.toString())) {
+                            data.name = previous.name;
+                        }
+                        data.skin = previous.skin;
+                        data.skinUrl = previous.skinUrl;
+                        data.slim = previous.slim;
+                    }
+                    players.put(uuid, data);
+                    imported++;
+                } catch (IOException | RuntimeException exception) {
+                    LOGGER.debug("Could not import offline player from {}", file, exception);
+                }
+            }
+        } catch (IOException exception) {
+            LOGGER.warn("Could not scan offline players in {}", directory, exception);
+        }
+
+        if (imported > 0) {
+            saveState();
+            LOGGER.info("Imported {} historical offline player(s)", imported);
+        }
+    }
+
+    private static PlayerData storedPlayer(
+        MinecraftServer server,
+        BlueMapAPI api,
+        UUID uuid,
+        Path file
+    ) throws IOException {
+        CompoundTag tag = NbtIo.readCompressed(file.toFile());
+        var position = tag.getList("Pos", Tag.TAG_DOUBLE);
+        if (position.size() < 3) {
+            return null;
+        }
+
+        ResourceLocation dimension = ResourceLocation.tryParse(tag.getString("Dimension"));
+        ServerLevel level = dimension == null
+            ? null
+            : server.getLevel(ResourceKey.create(Registries.DIMENSION, dimension));
+        String worldId = level == null
+            ? null
+            : api.getWorld(level).map(world -> world.getId()).orElse(null);
+        if (worldId == null) {
+            return null;
+        }
+
+        PlayerData data = new PlayerData();
+        data.uuid = uuid.toString();
+        data.name = server.getProfileCache().get(uuid)
+            .map(profile -> profile.getName())
+            .filter(name -> name != null && !name.isBlank())
+            .orElse(data.uuid);
+        data.profileName = PLAYER_NAME.matcher(data.name).matches() ? data.name : null;
+        data.worldId = worldId;
+        data.online = false;
+        data.leftHanded = tag.getBoolean("LeftHanded");
+        data.x = position.getDouble(0);
+        data.y = position.getDouble(1);
+        data.z = position.getDouble(2);
+        if (!Double.isFinite(data.x) || !Double.isFinite(data.y) || !Double.isFinite(data.z)) {
+            return null;
+        }
+        var rotation = tag.getList("Rotation", Tag.TAG_FLOAT);
+        data.yaw = rotation.size() > 0 ? rotation.getFloat(0) : 0;
+        data.pitch = rotation.size() > 1 ? rotation.getFloat(1) : 0;
+        data.lastSeen = Files.getLastModifiedTime(file).toMillis();
+        data.selectedSlot = Math.max(0, Math.min(8, tag.getInt("SelectedItemSlot")));
+
+        data.inventory = new ArrayList<>(Collections.nCopies(36, null));
+        ItemData[] armor = new ItemData[4];
+        var storedInventory = tag.getList("Inventory", Tag.TAG_COMPOUND);
+        for (int index = 0; index < storedInventory.size(); index++) {
+            CompoundTag stored = storedInventory.getCompound(index);
+            int slot = stored.getByte("Slot") & 255;
+            ItemData value = storedItem(stored);
+            if (slot < data.inventory.size()) {
+                data.inventory.set(slot, value);
+            } else if (slot >= 100 && slot < 104) {
+                armor[3 - (slot - 100)] = value;
+            } else if (slot == 150) {
+                data.offHand = value;
+            }
+        }
+        data.armor = Arrays.asList(armor);
+        data.mainHand = data.inventory.get(data.selectedSlot);
+        return data;
+    }
+
+    private static ItemData storedItem(CompoundTag tag) {
+        try {
+            return item(ItemStack.of(tag), null, false, false);
+        } catch (RuntimeException exception) {
+            return null;
         }
     }
 
@@ -1339,7 +1469,6 @@ final class BlueMapPlayerModelsServer {
         players.clear();
         skinAssets.clear();
         if (stateFile == null || !Files.isRegularFile(stateFile)) {
-            // ponytail: only players seen after installation are tracked; import playerdata NBT if historical coverage is needed.
             return;
         }
 
