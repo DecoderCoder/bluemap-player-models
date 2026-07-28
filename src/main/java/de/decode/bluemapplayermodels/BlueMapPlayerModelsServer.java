@@ -107,7 +107,7 @@ final class BlueMapPlayerModelsServer {
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
     private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
-    private static final String WEB_ASSET_VERSION = "1.2.7";
+    private static final String WEB_ASSET_VERSION = "1.3.0";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
     private static final int RESOURCE_MANIFEST_FORMAT = 1;
     private static final int MAX_SKIN_BYTES = 2_000_000;
@@ -211,8 +211,10 @@ final class BlueMapPlayerModelsServer {
             Path root = api.getWebApp().getWebRoot();
             String script = "player-models-" + WEB_ASSET_VERSION + ".js";
             String style = "player-models-" + WEB_ASSET_VERSION + ".css";
+            String entityModels = "entity-models-" + WEB_ASSET_VERSION + ".json";
             copyResource("/web/player-models.js", root.resolve(ASSET_ROOT).resolve(script));
             copyResource("/web/player-models.css", root.resolve(ASSET_ROOT).resolve(style));
+            copyResource("/web/entity-models.json", root.resolve(ASSET_ROOT).resolve(entityModels));
             publishClientResources(root.resolve(ASSET_ROOT));
             api.getWebApp().registerScript(ASSET_ROOT + "/" + script);
             api.getWebApp().registerStyle(ASSET_ROOT + "/" + style);

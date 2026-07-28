@@ -16,8 +16,8 @@ models and loaded entities to the map.
 - Gray offline players at their saved logout positions
 - Logout snapshots persisted in the world's `data` folder
 - Historical offline players imported from Minecraft's existing `playerdata`
-- Up to 128 loaded non-player entities per mapped world, with vanilla textures
-  and simple 3D model families
+- Up to 128 loaded non-player entities per mapped world, with extracted vanilla
+  textures and exact baked 1.20.1 model-layer geometry
 - BlueMap-styled, responsive settings and inventory side panels
 - Stable inventory slots that do not blink when live data refreshes
 - Independent 1-30 second player and entity display-update intervals
@@ -31,13 +31,16 @@ permutations (including armor trims) are resolved during extraction. The
 browser caches parsed models, textures, and rendered icons, and selects one
 deterministic frame from animated item textures.
 
-Minecraft entity geometry is Java code rather than resource-pack model JSON, so
-non-player entities continue to use the add-on's model families with extracted
-textures. `builtin/entity`, Forge custom model loaders, live compass/clock
-properties, and other client-only renderers use deterministic fallbacks because
-a dedicated server cannot run Minecraft's client renderer. Mod armor using the
-normal `ArmorMaterial` texture convention is resolved exactly; armor supplied
-only through a client-side custom renderer cannot be.
+Minecraft entity geometry is Java code rather than resource-pack model JSON. The
+build therefore bakes Forge's mapped Minecraft 1.20.1 model layers into a compact
+browser asset. Vanilla entities with a matching layer use its exact cuboids,
+rotations, inflation, omitted faces, and UV layout; unsupported and modded
+entities retain the deterministic family fallback. State-only renderer layers,
+`builtin/entity`, Forge custom model loaders, live compass/clock properties, and
+other client-only renderers use deterministic fallbacks because a dedicated
+server cannot run Minecraft's client renderer. Mod armor using the normal
+`ArmorMaterial` texture convention is resolved exactly; armor supplied only
+through a client-side custom renderer cannot be.
 
 ## Requirements
 
@@ -52,7 +55,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.2.7.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.3.0.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 

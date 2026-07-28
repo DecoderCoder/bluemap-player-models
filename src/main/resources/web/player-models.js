@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.7";
+    const VERSION = "1.3.0";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
@@ -233,33 +233,67 @@
         return "generic";
     };
 
+    const ENTITY_MODEL_ALIASES = {
+        pufferfish: "pufferfish_big",
+        tropical_fish: "tropical_fish_large"
+    };
+
+    const entityModelKeys = type => {
+        const id = splitId(type);
+        if (!id) return [];
+        const path = id.namespace === "minecraft"
+            ? ENTITY_MODEL_ALIASES[id.path] || id.path
+            : id.path;
+        return [`${id.namespace}:${path}`];
+    };
+
     const ENTITY_TEXTURES = {
         allay: "entity/allay/allay",
+        armor_stand: "entity/armorstand/wood",
+        axolotl: "entity/axolotl/axolotl_wild",
         bat: "entity/bat",
         bee: "entity/bee/bee",
         blaze: "entity/blaze",
+        boat: "entity/boat/oak",
+        camel: "entity/camel/camel",
         cave_spider: "entity/spider/cave_spider",
+        cat: "entity/cat/tabby",
+        chest_boat: "entity/chest_boat/oak",
+        chest_minecart: "entity/minecart",
         chicken: "entity/chicken",
         cod: "entity/fish/cod",
+        command_block_minecart: "entity/minecart",
         cow: "entity/cow/cow",
         creeper: "entity/creeper/creeper",
         dolphin: "entity/dolphin",
         donkey: "entity/horse/donkey",
         drowned: "entity/zombie/drowned",
         elder_guardian: "entity/guardian_elder",
+        end_crystal: "entity/end_crystal/end_crystal",
+        ender_dragon: "entity/enderdragon/dragon",
         enderman: "entity/enderman/enderman",
+        endermite: "entity/endermite",
         evoker: "entity/illager/evoker",
+        evoker_fangs: "entity/illager/evoker_fangs",
         fox: "entity/fox/fox",
+        frog: "entity/frog/temperate_frog",
+        furnace_minecart: "entity/minecart",
         ghast: "entity/ghast/ghast",
+        giant: "entity/zombie/zombie",
         glow_squid: "entity/squid/glow_squid",
         goat: "entity/goat/goat",
         guardian: "entity/guardian",
         hoglin: "entity/hoglin/hoglin",
+        hopper_minecart: "entity/minecart",
         horse: "entity/horse/horse_brown",
         husk: "entity/zombie/husk",
+        illusioner: "entity/illager/illusioner",
         iron_golem: "entity/iron_golem/iron_golem",
         llama: "entity/llama/creamy",
+        llama_spit: "entity/llama/spit",
         magma_cube: "entity/slime/magmacube",
+        minecart: "entity/minecart",
+        mooshroom: "entity/cow/red_mooshroom",
         mule: "entity/horse/mule",
         ocelot: "entity/cat/ocelot",
         panda: "entity/panda/panda",
@@ -276,22 +310,35 @@
         salmon: "entity/fish/salmon",
         sheep: "entity/sheep/sheep",
         shulker: "entity/shulker/shulker",
+        shulker_bullet: "entity/shulker/spark",
+        silverfish: "entity/silverfish",
         skeleton: "entity/skeleton/skeleton",
+        skeleton_horse: "entity/horse/horse_skeleton",
         slime: "entity/slime/slime",
+        sniffer: "entity/sniffer/sniffer",
         snow_golem: "entity/snow_golem",
+        spawner_minecart: "entity/minecart",
         spider: "entity/spider/spider",
         squid: "entity/squid/squid",
         stray: "entity/skeleton/stray",
+        strider: "entity/strider/strider",
+        tnt_minecart: "entity/minecart",
+        trader_llama: "entity/llama/creamy",
         turtle: "entity/turtle/big_sea_turtle",
+        tropical_fish: "entity/fish/tropical_b",
         vex: "entity/illager/vex",
         villager: "entity/villager/villager",
         vindicator: "entity/illager/vindicator",
         wandering_trader: "entity/wandering_trader",
+        warden: "entity/warden/warden",
         witch: "entity/witch",
+        wither: "entity/wither/wither",
         wither_skeleton: "entity/skeleton/wither_skeleton",
         wolf: "entity/wolf/wolf",
         zoglin: "entity/hoglin/zoglin",
         zombie: "entity/zombie/zombie",
+        zombie_horse: "entity/horse/horse_zombie",
+        zombie_villager: "entity/zombie_villager/zombie_villager",
         zombified_piglin: "entity/piglin/zombified_piglin"
     };
 
@@ -310,6 +357,7 @@
             boxRegions,
             defaultFaceUv,
             entityFamily,
+            entityModelKeys,
             entityTextureKeys,
             firstAnimationFrame,
             grayscaleRgba,
@@ -353,6 +401,7 @@
         const modelJsonCache = new Map();
         const metadataCache = new Map();
         const itemIconCache = new Map();
+        const entityGeometryCache = new Map();
         const settings = loadSettings();
         const ui = createUi();
         const panel = ui.querySelector("#bpm-panel");
@@ -364,9 +413,11 @@
         let selectedPlayerId = null;
         let lastStatus = "";
         let resourceManifest = {generation: VERSION, models: {}, textures: {}, metadata: {}};
+        let entityModelData = null;
         let iconRenderer = null;
         const resourceReady = loadResourceManifest();
         const dueAt = {players: 0, entities: 0};
+        loadEntityModels();
 
         actorScene.name = "bluemap-live-actors";
         app.mapViewer.markers.add(actorScene);
@@ -525,6 +576,27 @@
                 return await fetch(url, {cache: "no-store", signal: request.signal});
             } finally {
                 clearTimeout(timeout);
+            }
+        }
+
+        async function loadEntityModels() {
+            try {
+                const response = await optionalFetch(`${addonRoot}entity-models-${VERSION}.json`);
+                if (!response.ok) return;
+                const payload = await response.json();
+                if (payload?.format !== 1
+                    || payload.minecraft !== "1.20.1"
+                    || !payload.models
+                    || typeof payload.models !== "object"
+                    || Array.isArray(payload.models)) return;
+                entityModelData = payload.models;
+                let changed = false;
+                entities.forEach(actor => {
+                    changed = upgradeEntityModel(actor) || changed;
+                });
+                if (changed) app.mapViewer.redraw();
+            } catch (error) {
+                console.debug("BlueMap vanilla entity models are unavailable", error);
             }
         }
 
@@ -1576,6 +1648,39 @@
             actor.label.remove();
         }
 
+        function entityGeometry(type) {
+            if (!entityModelData) return null;
+            for (const key of entityModelKeys(type)) {
+                if (!entityGeometryCache.has(key)) {
+                    const model = entityModelData[key];
+                    let geometry = null;
+                    if (Array.isArray(model?.positions)
+                        && model.positions.length >= 9
+                        && model.positions.length % 9 === 0
+                        && Array.isArray(model.uvs)
+                        && model.uvs.length * 3 === model.positions.length * 2
+                        && model.positions.every(Number.isFinite)
+                        && model.uvs.every(Number.isFinite)) {
+                        geometry = new Three.BufferGeometry();
+                        geometry.setAttribute(
+                            "position",
+                            new Three.Float32BufferAttribute(model.positions, 3)
+                        );
+                        geometry.setAttribute(
+                            "uv",
+                            new Three.Float32BufferAttribute(model.uvs, 2)
+                        );
+                        geometry.computeBoundingSphere();
+                        geometry.userData.bpmShared = true;
+                    }
+                    entityGeometryCache.set(key, geometry);
+                }
+                const geometry = entityGeometryCache.get(key);
+                if (geometry) return geometry;
+            }
+            return null;
+        }
+
         function entityMaterial(actor) {
             let hash = 0;
             for (const character of actor.data.type) {
@@ -1583,7 +1688,6 @@
             }
             const color = new Three.Color().setHSL(((hash >>> 0) % 360) / 360, 0.35, 0.58);
             const value = material(color);
-            actor.materials.push(value);
             getTexture(entityTextureKeys(actor.data.type)).then(texture => {
                 if (!texture || actor.removed) return;
                 value.map = texture;
@@ -1600,7 +1704,7 @@
             mesh.position.set(...position);
             if (rotation) mesh.rotation.set(...rotation);
             parent.add(mesh);
-            actor.meshes.push(mesh);
+            actor.ownedGeometries.push(mesh.geometry);
             return mesh;
         }
 
@@ -1621,13 +1725,44 @@
             mesh.position.set(...pixelPosition.map(coordinate => coordinate * PIXEL));
             if (rotation) mesh.rotation.set(...rotation);
             parent.add(mesh);
-            actor.meshes.push(mesh);
+            actor.ownedGeometries.push(mesh.geometry);
             return mesh;
         }
 
+        function buildExactEntityModel(actor) {
+            const geometry = entityGeometry(actor.data.type);
+            if (!geometry) return null;
+            const mesh = new Three.Mesh(geometry, actor.material);
+            mesh.name = `vanilla-entity-model-${actor.data.type}`;
+            return mesh;
+        }
+
+        function disposeEntityFallback(actor) {
+            actor.ownedGeometries.forEach(geometry => geometry.dispose());
+            actor.ownedGeometries = [];
+        }
+
+        function upgradeEntityModel(actor) {
+            if (actor.removed || actor.exactModel) return false;
+            const exact = buildExactEntityModel(actor);
+            if (!exact) return false;
+            actor.root.remove(actor.model);
+            disposeEntityFallback(actor);
+            actor.model = exact;
+            actor.exactModel = true;
+            actor.root.add(exact);
+            return true;
+        }
+
         function buildEntityModel(actor) {
+            const exact = buildExactEntityModel(actor);
+            actor.exactModel = !!exact;
+            return exact || buildFallbackEntityModel(actor);
+        }
+
+        function buildFallbackEntityModel(actor) {
             const group = new Three.Group();
-            const value = entityMaterial(actor);
+            const value = actor.material;
             const family = entityFamily(actor.data.type);
             let nominalWidth = 0.8;
             let nominalHeight = 1;
@@ -1712,13 +1847,15 @@
                 root: new Three.Group(),
                 target: new Three.Vector3(data.x, data.y, data.z),
                 targetYaw: -Three.MathUtils.degToRad(data.yaw || 0),
-                materials: [],
-                meshes: [],
+                material: null,
+                ownedGeometries: [],
+                exactModel: false,
                 removed: false
             };
             actor.root.position.copy(actor.target);
             actor.root.rotation.y = actor.targetYaw;
             actor.root.name = `entity-${data.uuid}`;
+            actor.material = entityMaterial(actor);
             actor.model = buildEntityModel(actor);
             actor.root.add(actor.model);
             actor.root.onClick = event => {
@@ -1741,8 +1878,8 @@
         function removeEntity(actor) {
             actor.removed = true;
             actorScene.remove(actor.root);
-            actor.meshes.forEach(mesh => mesh.geometry.dispose());
-            actor.materials.forEach(value => value.dispose());
+            disposeEntityFallback(actor);
+            actor.material.dispose();
         }
 
         function popupButton(label, action) {

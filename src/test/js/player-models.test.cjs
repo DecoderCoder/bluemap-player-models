@@ -10,6 +10,7 @@ const {
     boxRegions,
     defaultFaceUv,
     entityFamily,
+    entityModelKeys,
     entityTextureKeys,
     firstAnimationFrame,
     grayscaleRgba,
@@ -86,9 +87,19 @@ assert.equal(entityFamily("minecraft:creeper"), "creeper");
 assert.equal(entityFamily("minecraft:cow"), "quadruped");
 assert.equal(entityFamily("minecraft:zombie"), "humanoid");
 assert.equal(entityFamily("example:unknown_beast"), "generic");
+assert.deepEqual(entityModelKeys("minecraft:pig"), ["minecraft:pig"]);
+assert.deepEqual(entityModelKeys("minecraft:pufferfish"), [
+    "minecraft:pufferfish_big"
+]);
+assert.deepEqual(entityModelKeys("minecraft:boat"), ["minecraft:boat"]);
+assert.deepEqual(entityModelKeys("example:unknown_beast"), ["example:unknown_beast"]);
 assert.deepEqual(
     entityTextureKeys("minecraft:creeper"),
     ["minecraft:entity/creeper/creeper"]
+);
+assert.deepEqual(
+    entityTextureKeys("minecraft:mooshroom"),
+    ["minecraft:entity/cow/red_mooshroom"]
 );
 assert.deepEqual(
     entityTextureKeys("example:unknown_beast"),
@@ -212,5 +223,36 @@ syncSlotNodes(fakeContainer, [
 assert.equal(createdSlots, 2);
 assert.equal(fakeContainer.children[0], originalSlots[0]);
 assert.equal(fakeContainer.children[1], originalSlots[1]);
+
+const entityModels = JSON.parse(fs.readFileSync(
+    "build/generated/entity-models/web/entity-models.json",
+    "utf8"
+));
+assert.equal(entityModels.format, 1);
+assert.equal(entityModels.minecraft, "1.20.1");
+for (const id of [
+    "minecraft:bee",
+    "minecraft:chicken",
+    "minecraft:cow",
+    "minecraft:pig"
+]) {
+    const model = entityModels.models[id];
+    assert.ok(model, `Missing generated ${id} model`);
+    assert.ok(model.positions.length > 0, `Empty generated ${id} model`);
+    assert.equal(model.positions.length % 9, 0);
+    assert.equal(model.uvs.length, model.positions.length / 3 * 2);
+    assert.ok(model.positions.every(Number.isFinite));
+    assert.ok(model.uvs.every(Number.isFinite));
+}
+assert.notDeepEqual(
+    entityModels.models["minecraft:pig"].positions,
+    entityModels.models["minecraft:cow"].positions
+);
+assert.equal(entityModels.models["minecraft:boat/oak"], undefined);
+assert.equal(entityModels.models["minecraft:ender_dragon"], undefined);
+assert.equal(entityModels.models["minecraft:minecart"], undefined);
+assert.equal(entityModels.models["minecraft:slime"], undefined);
+const ghastPositions = entityModels.models["minecraft:ghast"].positions;
+assert.ok(Math.max(...ghastPositions) - Math.min(...ghastPositions) > 4);
 
 console.log("player-models self-check passed");

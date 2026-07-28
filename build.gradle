@@ -15,6 +15,21 @@ java {
     targetCompatibility = JavaVersion.VERSION_17
 }
 
+def generatedEntityModelsDir = layout.buildDirectory.dir('generated/entity-models')
+def generatedEntityModelsFile = generatedEntityModelsDir.map {
+    it.file('web/entity-models.json')
+}
+def entityModelGeneratorWorkDir = layout.buildDirectory.dir('modelgen')
+
+sourceSets {
+    modelgen {
+        java.srcDir 'src/modelgen/java'
+        compileClasspath += sourceSets.main.compileClasspath
+        runtimeClasspath += output + compileClasspath
+    }
+    main.resources.srcDir generatedEntityModelsDir
+}
+
 minecraft {
     mappings channel: 'official', version: minecraft_version
     copyIdeResources = true
@@ -45,6 +60,8 @@ dependencies {
 }
 
 tasks.named('processResources', ProcessResources).configure {
+    dependsOn tasks.named('generateEntityModels')
+
     def properties = [
         mod_id: mod_id,
         mod_name: mod_name,
@@ -56,6 +73,21 @@ tasks.named('processResources', ProcessResources).configure {
     inputs.properties properties
     filesMatching(['META-INF/mods.toml']) {
         expand properties
+    }
+}
+
+tasks.register('generateEntityModels', JavaExec) {
+    dependsOn tasks.named('compileModelgenJava')
+    classpath = sourceSets.modelgen.runtimeClasspath
+    mainClass = 'de.decode.bluemapplayermodels.VanillaEntityModelGenerator'
+    inputs.files sourceSets.modelgen.output
+    inputs.property 'minecraftVersion', minecraft_version
+    inputs.property 'forgeVersion', forge_version
+    outputs.file generatedEntityModelsFile
+    doFirst {
+        entityModelGeneratorWorkDir.get().asFile.mkdirs()
+        workingDir entityModelGeneratorWorkDir
+        args generatedEntityModelsFile.get().asFile.absolutePath
     }
 }
 
