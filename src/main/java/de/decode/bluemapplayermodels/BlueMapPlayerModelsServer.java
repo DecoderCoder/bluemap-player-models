@@ -101,7 +101,7 @@ final class BlueMapPlayerModelsServer {
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
     private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
-    private static final String WEB_ASSET_VERSION = "1.2.2";
+    private static final String WEB_ASSET_VERSION = "1.2.3";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
     private static final int RESOURCE_MANIFEST_FORMAT = 1;
     private static final int MAX_SKIN_BYTES = 2_000_000;
@@ -314,6 +314,9 @@ final class BlueMapPlayerModelsServer {
         SkinInfo skin = skinInfo(player);
         data.slim = skin.slim();
         data.skin = skinAssets.get(player.getUUID());
+        data.skinUrl = skin.uri() == null
+            ? previous == null ? null : previous.skinUrl
+            : skin.uri().toString();
 
         boolean usingMainHand = player.isUsingItem()
             && player.getUsedItemHand() == InteractionHand.MAIN_HAND;
@@ -1277,6 +1280,13 @@ final class BlueMapPlayerModelsServer {
                 } else {
                     player.skin = null;
                 }
+                try {
+                    player.skinUrl = player.skinUrl == null
+                        ? null
+                        : validatedSkinUri(player.skinUrl).toString();
+                } catch (RuntimeException exception) {
+                    player.skinUrl = null;
+                }
                 players.put(uuid, player);
             }
         } catch (IOException | RuntimeException exception) {
@@ -1340,6 +1350,7 @@ final class BlueMapPlayerModelsServer {
         String name;
         String worldId;
         String skin;
+        String skinUrl;
         boolean slim;
         boolean online;
         boolean moving;

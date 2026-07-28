@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.2";
+    const VERSION = "1.2.3";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
@@ -31,6 +31,19 @@
         if (!root || !asset || asset.includes("..") || asset.startsWith("/")) return null;
         const path = asset.split("/").map(encodeURIComponent).join("/");
         return `${root.replace(/\/$/, "")}/assets/${path}`;
+    };
+
+    const minecraftSkinUrl = value => {
+        try {
+            const url = new URL(value);
+            return url.protocol === "https:"
+                && url.hostname === "textures.minecraft.net"
+                && /^\/texture\/[a-f0-9]+$/i.test(url.pathname)
+                ? url.href
+                : null;
+        } catch {
+            return null;
+        }
     };
 
     const normalizeInterval = value => {
@@ -308,6 +321,7 @@
             interpolationProgress,
             itemVisualKey,
             mapAssetUrl,
+            minecraftSkinUrl,
             modelOverrideMatches,
             normalizeResourceId,
             normalizeInterval,
@@ -1300,7 +1314,8 @@
         async function loadSkin(actor, attempt = 0) {
             if (actor.removed) return;
             const published = currentAssetUrl(actor.data.skin);
-            const fingerprint = encodeURIComponent(actor.data.skin || "pending");
+            const source = minecraftSkinUrl(actor.data.skinUrl);
+            const fingerprint = encodeURIComponent(actor.data.skin || source || "pending");
             const cached = new URL(
                 `skins/${encodeURIComponent(actor.data.uuid)}.png?bpm=${VERSION}-${fingerprint}`,
                 addonRoot
@@ -1308,6 +1323,7 @@
             let texture = null;
             for (const url of [...new Set([
                 published ? `${published}?bpm=${VERSION}` : null,
+                source,
                 cached
             ].filter(Boolean))]) {
                 texture = await loadUrlTexture(url);
@@ -1966,7 +1982,10 @@
                     if (!data?.uuid) continue;
                     incomingPlayers.add(data.uuid);
                     const existing = players.get(data.uuid);
-                    if (existing && existing.data.slim === data.slim && existing.data.skin === data.skin) {
+                    if (existing
+                        && existing.data.slim === data.slim
+                        && existing.data.skin === data.skin
+                        && existing.data.skinUrl === data.skinUrl) {
                         updatePlayer(existing, data);
                     } else {
                         if (existing) removePlayer(existing);

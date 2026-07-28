@@ -17,6 +17,7 @@ const {
     interpolationProgress,
     itemVisualKey,
     mapAssetUrl,
+    minecraftSkinUrl,
     modelOverrideMatches,
     normalizeResourceId,
     normalizeInterval,
@@ -53,6 +54,15 @@ assert.equal(
     "custom/maps/world/assets/bluemap-player-models/skins/player%20skin.png"
 );
 assert.equal(mapAssetUrl({mapDataRoot: "maps/world"}, "../bad.png"), null);
+assert.equal(
+    minecraftSkinUrl("http://textures.minecraft.net/texture/abcdef"),
+    null
+);
+assert.equal(
+    minecraftSkinUrl("https://textures.minecraft.net/texture/31f477eb1a7beee6"),
+    "https://textures.minecraft.net/texture/31f477eb1a7beee6"
+);
+assert.equal(minecraftSkinUrl("https://example.com/texture/abcdef"), null);
 assert.equal(normalizeInterval(5000), 5000);
 assert.equal(normalizeInterval(0), 1000);
 assert.equal(interpolationProgress(-1, 1000), 0);
