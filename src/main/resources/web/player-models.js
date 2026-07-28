@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.2.3";
+    const VERSION = "1.2.4";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
@@ -52,10 +52,7 @@
     };
 
     const interpolationProgress = (elapsed, duration) => {
-        const progress = Math.max(0, Math.min(1, elapsed / Math.max(1, duration)));
-        return progress < 0.5
-            ? 4 * progress * progress * progress
-            : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+        return Math.max(0, Math.min(1, elapsed / Math.max(1, duration)));
     };
 
     const splitId = id => {
@@ -1330,6 +1327,13 @@
                 if (texture || actor.removed) break;
             }
             if (actor.removed) return;
+            if (!texture) {
+                texture = await getTexture([
+                    actor.data.slim
+                        ? "minecraft:entity/player/slim/alex"
+                        : "minecraft:entity/player/wide/steve"
+                ]);
+            }
             if (!texture) {
                 if (attempt < 29) setTimeout(() => loadSkin(actor, attempt + 1), 2000);
                 return;

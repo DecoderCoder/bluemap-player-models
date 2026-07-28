@@ -101,15 +101,21 @@ final class BlueMapPlayerModelsServer {
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
     private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
-    private static final String WEB_ASSET_VERSION = "1.2.3";
+    private static final String WEB_ASSET_VERSION = "1.2.4";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
     private static final int RESOURCE_MANIFEST_FORMAT = 1;
     private static final int MAX_SKIN_BYTES = 2_000_000;
+    private static final int MAX_PROFILE_BYTES = 64_000;
     private static final int ENTITY_LIMIT = 128;
     private static final long SKIN_RETRY_DELAY_MS = 60_000;
     private static final long SKIN_REFRESH_MS = 24 * 60 * 60 * 1_000L;
     private static final Pattern DATA_PATH = Pattern.compile(
         "^\\s*data\\s*:\\s*(?:\"([^\"]+)\"|'([^']+)'|([^\\s#]+))\\s*(?:#.*)?$"
+    );
+    private static final Pattern PLAYER_NAME = Pattern.compile("[A-Za-z0-9_]{1,16}");
+    private static final Pattern PROFILE_UUID = Pattern.compile(
+        "([0-9a-fA-F]{8})([0-9a-fA-F]{4})([0-9a-fA-F]{4})"
+            + "([0-9a-fA-F]{4})([0-9a-fA-F]{12})"
     );
 
     private final Map<UUID, PlayerData> players = new ConcurrentHashMap<>();
@@ -298,6 +304,7 @@ final class BlueMapPlayerModelsServer {
         PlayerData data = new PlayerData();
         data.uuid = player.getStringUUID();
         data.name = player.getDisplayName().getString();
+        data.profileName = player.getGameProfile().getName();
         data.online = online;
         data.moving = online && player.getDeltaMovement().horizontalDistanceSqr() > 0.0004;
         data.crouching = player.isCrouching();
@@ -340,7 +347,7 @@ final class BlueMapPlayerModelsServer {
             ));
         }
         players.put(player.getUUID(), data);
-        cacheSkin(player.getUUID(), skin.uri());
+        cacheSkin(player.getUUID(), data.profileName, skin.uri());
     }
 
     private String worldId(ServerPlayer player, PlayerData previous) {
@@ -483,7 +490,7 @@ final class BlueMapPlayerModelsServer {
         return URI.create("https://textures.minecraft.net" + path);
     }
 
-    private void cacheSkin(UUID uuid, URI uri) {
+    private void cacheSkin(UUID uuid, String profileName, URI uri) {
         Path root = skinRoot;
         BlueMapAPI api = blueMap;
         long generation = apiGeneration;
@@ -515,7 +522,7 @@ final class BlueMapPlayerModelsServer {
                     activateSkin(api, generation, uuid, cachedAsset);
                 }
                 if (!fresh) {
-                    BufferedImage skin = loadSkin(api, uuid, uri);
+                    BufferedImage skin = loadSkin(api, uuid, profileName, uri);
                     if (skin == null) {
                         skinRetryAt.put(uuid, System.currentTimeMillis() + SKIN_RETRY_DELAY_MS);
                         return;
@@ -573,7 +580,12 @@ final class BlueMapPlayerModelsServer {
         publish();
     }
 
-    private static BufferedImage loadSkin(BlueMapAPI api, UUID uuid, URI uri)
+    private static BufferedImage loadSkin(
+        BlueMapAPI api,
+        UUID uuid,
+        String profileName,
+        URI uri
+    )
         throws IOException, InterruptedException {
         if (uri != null) {
             try {
@@ -600,8 +612,75 @@ final class BlueMapPlayerModelsServer {
             }
         }
 
-        BufferedImage image = api.getPlugin().getSkinProvider().load(uuid).orElse(null);
+        BufferedImage image = providedSkin(api, uuid);
+        if (isMinecraftSkin(image)) {
+            return image;
+        }
+
+        UUID onlineUuid = resolveOnlineUuid(profileName);
+        if (onlineUuid == null || onlineUuid.equals(uuid)) {
+            return null;
+        }
+        image = providedSkin(api, onlineUuid);
         return isMinecraftSkin(image) ? image : null;
+    }
+
+    private static BufferedImage providedSkin(BlueMapAPI api, UUID uuid) {
+        try {
+            return api.getPlugin().getSkinProvider().load(uuid).orElse(null);
+        } catch (IOException | RuntimeException exception) {
+            LOGGER.debug("BlueMap's skin provider failed for {}", uuid, exception);
+            return null;
+        }
+    }
+
+    private static UUID resolveOnlineUuid(String profileName) throws InterruptedException {
+        if (profileName == null || !PLAYER_NAME.matcher(profileName).matches()) {
+            return null;
+        }
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder(
+                    URI.create("https://api.mojang.com/users/profiles/minecraft/" + profileName)
+                )
+                .timeout(Duration.ofSeconds(15))
+                .GET()
+                .build();
+            HttpResponse<InputStream> response = HTTP.send(
+                request,
+                HttpResponse.BodyHandlers.ofInputStream()
+            );
+            try (InputStream input = response.body()) {
+                byte[] body = input.readNBytes(MAX_PROFILE_BYTES + 1);
+                if (response.statusCode() != 200 || body.length > MAX_PROFILE_BYTES) {
+                    LOGGER.debug(
+                        "No online Minecraft profile for {}: HTTP {}",
+                        profileName,
+                        response.statusCode()
+                    );
+                    return null;
+                }
+                String id = JsonParser.parseString(new String(body, StandardCharsets.UTF_8))
+                    .getAsJsonObject()
+                    .get("id")
+                    .getAsString();
+                Matcher matcher = PROFILE_UUID.matcher(id);
+                if (!matcher.matches()) {
+                    return null;
+                }
+                return UUID.fromString(String.join(
+                    "-",
+                    matcher.group(1),
+                    matcher.group(2),
+                    matcher.group(3),
+                    matcher.group(4),
+                    matcher.group(5)
+                ));
+            }
+        } catch (IOException | RuntimeException exception) {
+            LOGGER.debug("Failed to resolve online Minecraft profile {}", profileName, exception);
+            return null;
+        }
     }
 
     private static boolean isMinecraftSkin(BufferedImage image) {
@@ -1204,7 +1283,11 @@ final class BlueMapPlayerModelsServer {
         if (api == null) {
             return;
         }
-        players.keySet().forEach(uuid -> cacheSkin(uuid, null));
+        players.forEach((uuid, player) -> cacheSkin(
+            uuid,
+            player.profileName == null ? player.name : player.profileName,
+            null
+        ));
         if (!publishing.compareAndSet(false, true)) {
             return;
         }
@@ -1348,6 +1431,7 @@ final class BlueMapPlayerModelsServer {
     private static final class PlayerData {
         String uuid;
         String name;
+        transient String profileName;
         String worldId;
         String skin;
         String skinUrl;

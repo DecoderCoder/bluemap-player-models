@@ -66,9 +66,9 @@ assert.equal(minecraftSkinUrl("https://example.com/texture/abcdef"), null);
 assert.equal(normalizeInterval(5000), 5000);
 assert.equal(normalizeInterval(0), 1000);
 assert.equal(interpolationProgress(-1, 1000), 0);
-assert.equal(interpolationProgress(250, 1000), 0.0625);
+assert.equal(interpolationProgress(250, 1000), 0.25);
 assert.equal(interpolationProgress(500, 1000), 0.5);
-assert.equal(interpolationProgress(750, 1000), 0.9375);
+assert.equal(interpolationProgress(750, 1000), 0.75);
 assert.equal(interpolationProgress(2000, 1000), 1);
 assert.deepEqual(splitId("minecraft:diamond_sword"), {
     namespace: "minecraft",
