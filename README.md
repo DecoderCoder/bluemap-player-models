@@ -22,7 +22,7 @@ models and loaded entities to the map.
 - BlueMap-styled, responsive settings and inventory side panels
 - Stable inventory slots that do not blink when live data refreshes
 - Independent 1-30 second player and entity display-update intervals
-- Opt-in BETA real-time online-player movement with polling fallback
+- Default-on BETA real-time online-player movement with polling fallback
 
 The add-on reads a deterministic server-visible client-resource stack:
 BlueMap's downloaded vanilla client jar, loaded mod resources, then entries in
@@ -57,7 +57,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.3.4.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.3.5.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 
@@ -74,8 +74,8 @@ from the same full skin in the browser, so the label and 3D model stay in sync.
 
 ## BETA same-port live updates
 
-Real-time movement is disabled by default. Turn on the `BETA` switch in the
-Player Models settings to use it; normal JSON polling remains active for
+Real-time movement is enabled by default. Turn off the `BETA` switch in the
+Player Models settings to disable it; normal JSON polling remains active for
 metadata and automatic fallback.
 
 The add-on registers `/bluemap-player-models/live` directly on BlueMap 5.12's

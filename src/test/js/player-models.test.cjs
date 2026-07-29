@@ -11,6 +11,7 @@ assert.doesNotMatch(source, /if \(wasConnected\) retryRealtime\(token\);/);
 assert.doesNotMatch(source, /new window\.WebSocket/);
 
 const {
+    advanceWalkAnimation,
     armorTextureKey,
     boxRegions,
     defaultFaceUv,
@@ -19,6 +20,7 @@ const {
     entityTextureKeys,
     firstAnimationFrame,
     grayscaleRgba,
+    horizontalSpeed,
     inventoryOrder,
     interpolationSpeed,
     itemVisualKey,
@@ -31,8 +33,10 @@ const {
     playerAnimationPose,
     playerDataUrl,
     playerLiveUrl,
+    playerSettings,
     playerVitalsText,
     resolveTextureReference,
+    sampledHorizontalSpeed,
     syncSlotNodes,
     splitId
 } = global.__BPM_TEST_API__;
@@ -116,48 +120,110 @@ assert.equal(
 assert.equal(minecraftSkinUrl("https://example.com/texture/abcdef"), null);
 assert.equal(normalizeInterval(5000), 5000);
 assert.equal(normalizeInterval(0), 1000);
+assert.equal(playerSettings({}).realTimePlayers, true);
+const migratedSettings = playerSettings({realTimePlayers: false, labels: false});
+assert.deepEqual(
+    {
+        labels: migratedSettings.labels,
+        realTimePlayers: migratedSettings.realTimePlayers,
+        realTimeDefaultVersion: migratedSettings.realTimeDefaultVersion
+    },
+    {labels: false, realTimePlayers: true, realTimeDefaultVersion: 1}
+);
+assert.equal(
+    playerSettings({...migratedSettings, realTimePlayers: false}).realTimePlayers,
+    false
+);
 assert.equal(interpolationSpeed(10, 1000), 0.01);
 assert.equal(interpolationSpeed(2, 1000), 0.002);
 assert.equal(interpolationSpeed(-1, 1000), 0);
 assert.equal(interpolationSpeed(10, 0), 10);
+assert.equal(
+    horizontalSpeed({x: 0, y: 0, z: 0}, {x: 0, y: 10, z: 0}, 1000),
+    0
+);
+assert.equal(
+    horizontalSpeed({x: 0, y: 0, z: 0}, {x: 3, y: 10, z: 4}, 1000),
+    0.005
+);
+assert.equal(
+    sampledHorizontalSpeed(0.5, {x: 3, z: 4}, {x: 3, z: 4}, 1000, false),
+    0.5
+);
+assert.equal(
+    sampledHorizontalSpeed(0.5, {x: 3, z: 4}, {x: 3, z: 4}, 1000, true),
+    0
+);
+const splitWalkState = {
+    walkPosition: 0,
+    walkPreviousAmount: 0,
+    walkAmount: 0,
+    walkTickMs: 0
+};
+advanceWalkAnimation(splitWalkState, 1, 25, true);
+advanceWalkAnimation(splitWalkState, 1, 25, true);
+assert.equal(splitWalkState.walkAmount, 0.4);
+assert.equal(splitWalkState.walkPosition, 0.4);
+const longWalkState = {
+    walkPosition: 0,
+    walkPreviousAmount: 0,
+    walkAmount: 0,
+    walkTickMs: 0
+};
+advanceWalkAnimation(longWalkState, 1, 100, true);
+assert.ok(Math.abs(longWalkState.walkAmount - 0.64) < 1e-12);
+assert.ok(Math.abs(longWalkState.walkPosition - 1.04) < 1e-12);
+advanceWalkAnimation(longWalkState, 1, 16, false);
+assert.equal(longWalkState.walkAmount, 0);
+assert.equal(longWalkState.walkPreviousAmount, 0);
+assert.equal(longWalkState.walkTickMs, 0);
 const walkPose = playerAnimationPose(
-    Math.PI / (2 * 0.012),
+    0,
+    0.5,
+    0,
     {online: true, moving: true},
-    false,
     true
 );
 const runPose = playerAnimationPose(
-    Math.PI / (2 * 0.018),
+    0,
+    1,
+    0,
     {online: true, moving: true, sprinting: true},
-    false,
     true
 );
 assert.equal(walkPose.running, false);
 assert.equal(runPose.running, true);
-assert.ok(Math.abs(runPose.rightLegX) > Math.abs(walkPose.rightLegX));
-assert.deepEqual(
-    playerAnimationPose(0, {online: true, crouching: true}, false, true),
-    {
-        animated: false,
-        running: false,
-        mining: false,
-        modelY: -0.16,
-        bodyX: 0.45,
-        rightArmX: 0.35,
-        leftArmX: 0.35,
-        rightLegX: -0.45,
-        leftLegX: -0.45
-    }
+assert.equal(walkPose.rightArmX, -0.5);
+assert.equal(walkPose.rightLegX, 0.7);
+assert.equal(runPose.rightArmX, -1);
+assert.equal(runPose.rightLegX, 1.4);
+const crouchPose = playerAnimationPose(
+    0,
+    0,
+    0,
+    {online: true, crouching: true},
+    true
 );
+assert.equal(crouchPose.modelY, 0);
+assert.equal(crouchPose.headY, 1.575 - 4.2 * 0.05625);
+assert.equal(crouchPose.bodyY, 1.35 - 3.2 * 0.05625);
+assert.equal(crouchPose.rightLegY, 0.675 - 0.2 * 0.05625);
+assert.equal(crouchPose.rightLegZ, -4 * 0.05625);
+assert.equal(crouchPose.bodyX, 0.5);
+assert.equal(crouchPose.rightArmX, 0.4);
+assert.equal(crouchPose.leftArmX, 0.4);
+assert.equal(crouchPose.rightLegX, 0);
+assert.equal(Math.abs(crouchPose.leftLegX), 0);
 assert.equal(
-    playerAnimationPose(0, {online: true, crouching: true}, false, false).bodyX,
+    playerAnimationPose(0, 0, 0, {online: true, crouching: true}, false).bodyX,
     0
 );
 assert.equal(
     playerAnimationPose(
         0,
+        0,
+        0,
         {online: true, swinging: true, leftHanded: false},
-        false,
         true
     ).rightArmX,
     -1.05
@@ -165,8 +231,9 @@ assert.equal(
 assert.equal(
     playerAnimationPose(
         0,
+        0,
+        0,
         {online: true, swinging: true, leftHanded: true},
-        false,
         true
     ).leftArmX,
     -1.05

@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.3.4";
+    const VERSION = "1.3.5";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const PLAYER_LIVE_PATH = "/bluemap-player-models/live";
@@ -56,8 +56,64 @@
         return REFRESH_INTERVALS.includes(interval) ? interval : 1000;
     };
 
+    const playerSettings = stored => {
+        const source = stored && typeof stored === "object" && !Array.isArray(stored)
+            ? stored
+            : {};
+        const migrated = Number(source.realTimeDefaultVersion) >= 1;
+        const settings = {
+            playerModels: true,
+            animatePlayers: true,
+            armor: true,
+            offlinePlayers: true,
+            entities: true,
+            labels: true,
+            playerVitals: false,
+            realTimePlayers: true,
+            playerRefreshMs: 1000,
+            entityRefreshMs: 1000,
+            ...source
+        };
+        if (!migrated) settings.realTimePlayers = true;
+        settings.realTimeDefaultVersion = 1;
+        settings.playerRefreshMs = normalizeInterval(settings.playerRefreshMs);
+        settings.entityRefreshMs = normalizeInterval(settings.entityRefreshMs);
+        return settings;
+    };
+
     const interpolationSpeed = (distance, interval) =>
         Math.max(0, distance) / Math.max(1, interval);
+
+    const horizontalSpeed = (from, to, interval) =>
+        interpolationSpeed(Math.hypot(to.x - from.x, to.z - from.z), interval);
+
+    const sampledHorizontalSpeed = (current, from, to, interval, sampleAdvanced) =>
+        sampleAdvanced || from.x !== to.x || from.z !== to.z
+            ? horizontalSpeed(from, to, interval)
+            : current;
+
+    const advanceWalkAnimation = (state, target, elapsed, active) => {
+        if (!active) {
+            state.walkPreviousAmount = 0;
+            state.walkAmount = 0;
+            state.walkTickMs = 0;
+            return {position: state.walkPosition, amount: 0};
+        }
+        state.walkTickMs += Math.max(0, Number(elapsed) || 0);
+        target = Math.max(0, Math.min(1, Number(target) || 0));
+        while (state.walkTickMs >= 50) {
+            state.walkPreviousAmount = state.walkAmount;
+            state.walkAmount += (target - state.walkAmount) * 0.4;
+            state.walkPosition += state.walkAmount;
+            state.walkTickMs -= 50;
+        }
+        const partialTick = state.walkTickMs / 50;
+        return {
+            position: state.walkPosition - state.walkAmount * (1 - partialTick),
+            amount: state.walkPreviousAmount
+                + (state.walkAmount - state.walkPreviousAmount) * partialTick
+        };
+    };
 
     const playerVitalsText = data => {
         const health = Number(data?.health);
@@ -77,35 +133,43 @@
             + ` · Hunger ${Math.min(20, Math.round(foodLevel))}/20`;
     };
 
-    const playerAnimationPose = (now, data, interpolating, enabled) => {
+    const playerAnimationPose = (walkPosition, walkAmount, now, data, enabled) => {
         const online = !!data?.online;
         const crouching = enabled && online && !!data?.crouching;
-        const walking = enabled && online && (!!data?.moving || interpolating);
-        const running = walking && !!data?.sprinting && !crouching;
-        const stride = walking
-            ? Math.sin(now * (running ? 0.018 : crouching ? 0.009 : 0.012))
-                * (running ? 1.05 : crouching ? 0.38 : 0.72)
+        const amount = enabled && online
+            ? Math.max(0, Math.min(1, Number(walkAmount) || 0))
             : 0;
+        const walking = amount > 0.001;
+        const running = walking && !!data?.sprinting && !crouching;
+        // Minecraft 1.20.1 HumanoidModel.setupAnim gait.
+        const wave = walking ? Math.cos((Number(walkPosition) || 0) * 0.6662) : 0;
         const crouch = crouching ? 1 : 0;
-        let rightArm = stride + crouch * 0.35;
-        let leftArm = -stride + crouch * 0.35;
+        let rightArm = -wave * amount + crouch * 0.4;
+        let leftArm = wave * amount + crouch * 0.4;
         const mining = enabled && online && !!data?.swinging;
         if (mining) {
             const chop = -1.05 + Math.sin(now * 0.025) * 0.5;
             if (data.leftHanded) leftArm = chop;
             else rightArm = chop;
         }
-        const legStride = stride * (crouching ? 0.55 : 1);
         return {
             animated: walking || mining,
             running,
             mining,
-            modelY: -0.16 * crouch,
-            bodyX: 0.45 * crouch,
+            modelY: 0,
+            headY: 1.575 - 4.2 * PIXEL * crouch,
+            bodyY: 1.35 - 3.2 * PIXEL * crouch,
+            rightArmY: 1.35 - 3.2 * PIXEL * crouch,
+            leftArmY: 1.35 - 3.2 * PIXEL * crouch,
+            rightLegY: 0.675 - 0.2 * PIXEL * crouch,
+            leftLegY: 0.675 - 0.2 * PIXEL * crouch,
+            rightLegZ: -4 * PIXEL * crouch,
+            leftLegZ: -4 * PIXEL * crouch,
+            bodyX: 0.5 * crouch,
             rightArmX: rightArm,
             leftArmX: leftArm,
-            rightLegX: -legStride - 0.45 * crouch,
-            leftLegX: legStride - 0.45 * crouch
+            rightLegX: wave * 1.4 * amount,
+            leftLegX: -wave * 1.4 * amount
         };
     };
 
@@ -426,6 +490,7 @@
 
     if (globalThis.__BPM_TEST__) {
         globalThis.__BPM_TEST_API__ = {
+            advanceWalkAnimation,
             armorTextureKey,
             boxRegions,
             defaultFaceUv,
@@ -434,6 +499,7 @@
             entityTextureKeys,
             firstAnimationFrame,
             grayscaleRgba,
+            horizontalSpeed,
             inventoryOrder,
             interpolationSpeed,
             itemVisualKey,
@@ -445,9 +511,11 @@
             playerAnimationPose,
             playerDataUrl,
             playerLiveUrl,
+            playerSettings,
             playerVitalsText,
             mergePlayerMotion,
             resolveTextureReference,
+            sampledHorizontalSpeed,
             syncSlotNodes,
             splitId
         };
@@ -517,25 +585,10 @@
         });
 
         function loadSettings() {
-            const defaults = {
-                playerModels: true,
-                animatePlayers: true,
-                armor: true,
-                offlinePlayers: true,
-                entities: true,
-                labels: true,
-                playerVitals: false,
-                realTimePlayers: false,
-                playerRefreshMs: 1000,
-                entityRefreshMs: 1000
-            };
             try {
-                const loaded = {...defaults, ...JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}")};
-                loaded.playerRefreshMs = normalizeInterval(loaded.playerRefreshMs);
-                loaded.entityRefreshMs = normalizeInterval(loaded.entityRefreshMs);
-                return loaded;
+                return playerSettings(JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"));
             } catch {
-                return defaults;
+                return playerSettings();
             }
         }
 
@@ -1358,6 +1411,11 @@
                 target: initialPosition.clone(),
                 sampledAt: Number(data.lastSeen) || 0,
                 motionSpeed: 0,
+                walkSpeed: 0,
+                walkPosition: 0,
+                walkPreviousAmount: 0,
+                walkAmount: 0,
+                walkTickMs: 0,
                 targetYaw: -Three.MathUtils.degToRad(data.yaw || 0),
                 baseMaterial: material(0x78909c),
                 overlayMaterial: material(0xffffff),
@@ -1400,8 +1458,17 @@
             actor.model.add(actor.head);
 
             actor.body = new Three.Group();
-            actor.body.position.set(0, 1.0125, 0);
-            addSkinPart(actor, actor.body, 8, 12, 4, [16, 16], [16, 32], [0, 0, 0]);
+            actor.body.position.set(0, 1.35, 0);
+            addSkinPart(
+                actor,
+                actor.body,
+                8,
+                12,
+                4,
+                [16, 16],
+                [16, 32],
+                [0, -6 * PIXEL, 0]
+            );
             actor.model.add(actor.body);
 
             actor.rightArm = addLimb(
@@ -1538,11 +1605,18 @@
             const previousSampleAt = actor.sampledAt;
             data = mergePlayerMotion(actor.data, data, previousSampleAt);
             actor.data = data;
-            actor.target.set(data.x, data.y, data.z);
             actor.sampledAt = Number(data.lastSeen) || previousSampleAt;
             const sampleInterval = actor.sampledAt > previousSampleAt
                 ? actor.sampledAt - previousSampleAt
                 : settings.playerRefreshMs;
+            actor.walkSpeed = sampledHorizontalSpeed(
+                actor.walkSpeed,
+                actor.target,
+                data,
+                sampleInterval,
+                actor.sampledAt > previousSampleAt
+            );
+            actor.target.set(data.x, data.y, data.z);
             actor.motionSpeed = interpolationSpeed(
                 actor.positionAnchor.position.distanceTo(actor.target),
                 sampleInterval
@@ -1643,14 +1717,14 @@
             }
             if (chest) {
                 addArmorLayer(actor, chest, 1, (value, grow) => {
-                    addArmorMesh(actor, actor.body, [8, 12, 4], [16, 16], [0, 0, 0], value, 1.08 + grow);
+                    addArmorMesh(actor, actor.body, [8, 12, 4], [16, 16], [0, -6 * PIXEL, 0], value, 1.08 + grow);
                     addArmorMesh(actor, actor.rightArm, [4, 12, 4], [40, 16], [0, -6 * PIXEL, 0], value, 1.08 + grow);
                     addArmorMesh(actor, actor.leftArm, [4, 12, 4], [40, 16], [0, -6 * PIXEL, 0], value, 1.08 + grow);
                 });
             }
             if (legs) {
                 addArmorLayer(actor, legs, 2, (value, grow) => {
-                    addArmorMesh(actor, actor.body, [8, 12, 4], [16, 16], [0, 0, 0], value, 1.04 + grow);
+                    addArmorMesh(actor, actor.body, [8, 12, 4], [16, 16], [0, -6 * PIXEL, 0], value, 1.04 + grow);
                     addArmorMesh(actor, actor.rightLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value, 1.08 + grow);
                     addArmorMesh(actor, actor.leftLeg, [4, 12, 4], [0, 16], [0, -6 * PIXEL, 0], value, 1.08 + grow);
                 });
@@ -2467,6 +2541,10 @@
 
                 const remaining = actor.positionAnchor.position.distanceTo(actor.target);
                 const moving = remaining > 0.001;
+                const walking = Math.hypot(
+                    actor.positionAnchor.position.x - actor.target.x,
+                    actor.positionAnchor.position.z - actor.target.z
+                ) > 0.001;
                 if (moving) {
                     const step = actor.motionSpeed * frameDelta;
                     actor.positionAnchor.position.lerp(
@@ -2498,26 +2576,43 @@
                     changed = true;
                 }
 
+                const walkTarget = settings.animatePlayers
+                    && actor.data.online
+                    && (actor.data.moving || walking)
+                    ? Math.min(actor.walkSpeed * 200, 1)
+                    : 0;
+                const walk = advanceWalkAnimation(
+                    actor,
+                    walkTarget,
+                    delta,
+                    settings.animatePlayers && actor.data.online
+                );
                 const pose = playerAnimationPose(
+                    walk.position,
+                    walk.amount,
                     now,
                     actor.data,
-                    moving,
                     settings.animatePlayers
                 );
-                let poseSettling = false;
                 [
                     [actor.model.position, "y", pose.modelY],
+                    [actor.head.position, "y", pose.headY],
+                    [actor.body.position, "y", pose.bodyY],
+                    [actor.rightArm.position, "y", pose.rightArmY],
+                    [actor.leftArm.position, "y", pose.leftArmY],
+                    [actor.rightLeg.position, "y", pose.rightLegY],
+                    [actor.leftLeg.position, "y", pose.leftLegY],
+                    [actor.rightLeg.position, "z", pose.rightLegZ],
+                    [actor.leftLeg.position, "z", pose.leftLegZ],
                     [actor.body.rotation, "x", pose.bodyX],
                     [actor.rightArm.rotation, "x", pose.rightArmX],
                     [actor.leftArm.rotation, "x", pose.leftArmX],
                     [actor.rightLeg.rotation, "x", pose.rightLegX],
                     [actor.leftLeg.rotation, "x", pose.leftLegX]
                 ].forEach(([target, property, value]) => {
-                    const difference = value - target[property];
-                    poseSettling ||= Math.abs(difference) > 0.001;
-                    target[property] += difference * blend;
+                    target[property] = value;
                 });
-                changed ||= pose.animated || poseSettling || Math.abs(turn) > 0.001;
+                changed ||= pose.animated || Math.abs(turn) > 0.001;
             });
 
             entities.forEach(actor => {
