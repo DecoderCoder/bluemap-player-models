@@ -1,14 +1,15 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.3.3";
+    const VERSION = "1.3.4";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const PLAYER_LIVE_PATH = "/bluemap-player-models/live";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
     const REFRESH_INTERVALS = [1000, 2000, 5000, 10000, 30000];
     const PLAYER_MOTION_FIELDS = [
-        "x", "y", "z", "yaw", "pitch", "moving", "crouching", "lastSeen"
+        "x", "y", "z", "yaw", "pitch", "moving", "sprinting", "crouching",
+        "swinging", "health", "maxHealth", "foodLevel", "lastSeen"
     ];
 
     const boxRegions = (x, y, width, height, depth) => [
@@ -57,6 +58,56 @@
 
     const interpolationSpeed = (distance, interval) =>
         Math.max(0, distance) / Math.max(1, interval);
+
+    const playerVitalsText = data => {
+        const health = Number(data?.health);
+        const maxHealth = Number(data?.maxHealth);
+        const foodLevel = Number(data?.foodLevel);
+        if (!data?.online
+            || !Number.isFinite(health)
+            || !Number.isFinite(maxHealth)
+            || !Number.isFinite(foodLevel)
+            || health < 0
+            || maxHealth <= 0
+            || foodLevel < 0) {
+            return "";
+        }
+        const format = value => Number.isInteger(value) ? String(value) : value.toFixed(1);
+        return `Health ${format(health)}/${format(maxHealth)}`
+            + ` · Hunger ${Math.min(20, Math.round(foodLevel))}/20`;
+    };
+
+    const playerAnimationPose = (now, data, interpolating, enabled) => {
+        const online = !!data?.online;
+        const crouching = enabled && online && !!data?.crouching;
+        const walking = enabled && online && (!!data?.moving || interpolating);
+        const running = walking && !!data?.sprinting && !crouching;
+        const stride = walking
+            ? Math.sin(now * (running ? 0.018 : crouching ? 0.009 : 0.012))
+                * (running ? 1.05 : crouching ? 0.38 : 0.72)
+            : 0;
+        const crouch = crouching ? 1 : 0;
+        let rightArm = stride + crouch * 0.35;
+        let leftArm = -stride + crouch * 0.35;
+        const mining = enabled && online && !!data?.swinging;
+        if (mining) {
+            const chop = -1.05 + Math.sin(now * 0.025) * 0.5;
+            if (data.leftHanded) leftArm = chop;
+            else rightArm = chop;
+        }
+        const legStride = stride * (crouching ? 0.55 : 1);
+        return {
+            animated: walking || mining,
+            running,
+            mining,
+            modelY: -0.16 * crouch,
+            bodyX: 0.45 * crouch,
+            rightArmX: rightArm,
+            leftArmX: leftArm,
+            rightLegX: -legStride - 0.45 * crouch,
+            leftLegX: legStride - 0.45 * crouch
+        };
+    };
 
     const playerLiveUrl = (href, mapId, after) => {
         const url = new URL(PLAYER_LIVE_PATH, href);
@@ -391,8 +442,10 @@
             modelOverrideMatches,
             normalizeResourceId,
             normalizeInterval,
+            playerAnimationPose,
             playerDataUrl,
             playerLiveUrl,
+            playerVitalsText,
             mergePlayerMotion,
             resolveTextureReference,
             syncSlotNodes,
@@ -471,6 +524,7 @@
                 offlinePlayers: true,
                 entities: true,
                 labels: true,
+                playerVitals: false,
                 realTimePlayers: false,
                 playerRefreshMs: 1000,
                 entityRefreshMs: 1000
@@ -496,11 +550,20 @@
         function buildSettings() {
             const definitions = [
                 ["playerModels", "3D player models", "Replace BlueMap's native player heads"],
-                ["animatePlayers", "Walking animation", "Animate player arms and legs"],
+                [
+                    "animatePlayers",
+                    "Player animations",
+                    "Animate walking, running, crouching, and mining"
+                ],
                 ["armor", "Player armor", "Show equipped armor layers"],
                 ["offlinePlayers", "Offline players", "Keep logout positions in gray"],
                 ["entities", "Entities", "Show loaded non-player entities"],
                 ["labels", "Player labels", "Show skin, name, and held item"],
+                [
+                    "playerVitals",
+                    "Health & hunger",
+                    "Show levels below online player names"
+                ],
                 ["realTimePlayers", "BETA", "Real time on the BlueMap port"]
             ];
             const list = ui.querySelector("#bpm-settings-list");
@@ -1196,7 +1259,9 @@
         function createPlayerLabel(data) {
             const element = document.createElement("button");
             const head = document.createElement("img");
-            const text = document.createElement("span");
+            const copy = document.createElement("span");
+            const name = document.createElement("span");
+            const vitals = document.createElement("small");
             const held = document.createElement("img");
             element.type = "button";
             element.className = "bpm-player-label";
@@ -1204,7 +1269,12 @@
             head.alt = "";
             head.draggable = false;
             head.src = new URL("assets/steve.png", document.baseURI).href;
-            text.textContent = data.name;
+            copy.className = "bpm-player-label-copy";
+            name.className = "bpm-player-name";
+            name.textContent = data.name;
+            vitals.className = "bpm-player-vitals";
+            vitals.hidden = true;
+            copy.append(name, vitals);
             held.className = "bpm-player-held";
             held.alt = "";
             held.draggable = false;
@@ -1212,7 +1282,7 @@
             held.addEventListener("error", () => {
                 held.hidden = true;
             });
-            element.append(head, text, held);
+            element.append(head, copy, held);
             return element;
         }
 
@@ -1255,7 +1325,8 @@
         }
 
         function updatePlayerLabel(actor) {
-            actor.label.querySelector("span").textContent = actor.data.name;
+            actor.labelName.textContent = actor.data.name;
+            actor.labelVitals.textContent = playerVitalsText(actor.data);
             actor.label.classList.toggle("bpm-offline", !actor.data.online);
             actor.label.classList.toggle("bpm-hidden-label", !settings.labels);
             const item = actor.data.mainHand || actor.data.offHand;
@@ -1352,6 +1423,8 @@
 
             actor.label = createPlayerLabel(data);
             actor.labelHead = actor.label.querySelector(".bpm-player-head");
+            actor.labelName = actor.label.querySelector(".bpm-player-name");
+            actor.labelVitals = actor.label.querySelector(".bpm-player-vitals");
             actor.labelHeld = actor.label.querySelector(".bpm-player-held");
             actor.labelObject = createCss2DObject(actor.label);
             actor.labelObject.position.set(0, 2.05, 0);
@@ -1459,7 +1532,6 @@
                 clearNativeMarker(actor);
                 actor.nativeMarker = marker;
             }
-            actor.model.position.y = actor.data.crouching ? -0.16 : 0;
         }
 
         function updatePlayer(actor, data) {
@@ -1641,6 +1713,9 @@
             actor.lookIndicator.visible = show && actor.data.online && isFollowing(actor);
             actor.armorMeshes.forEach(mesh => mesh.visible = settings.armor);
             actor.label.classList.toggle("bpm-hidden-label", !settings.labels);
+            actor.labelVitals.hidden = !settings.playerVitals
+                || !actor.data.online
+                || !actor.labelVitals.textContent;
             actor.nativeMarker?.element?.classList.toggle(
                 "bpm-model-ready",
                 show
@@ -2240,7 +2315,9 @@
                             ...actor.data,
                             ...data,
                             moving: !!data.moving,
+                            sprinting: !!data.sprinting,
                             crouching: !!data.crouching,
+                            swinging: !!data.swinging,
                             lastSeen: sampledAt
                         });
                         changed = true;
@@ -2421,15 +2498,26 @@
                     changed = true;
                 }
 
-                const walking = settings.animatePlayers
-                    && actor.data.online
-                    && (actor.data.moving || moving);
-                const swing = walking ? Math.sin(now * 0.012) * 0.72 : 0;
-                actor.rightArm.rotation.x += (swing - actor.rightArm.rotation.x) * blend;
-                actor.leftArm.rotation.x += (-swing - actor.leftArm.rotation.x) * blend;
-                actor.rightLeg.rotation.x += (-swing - actor.rightLeg.rotation.x) * blend;
-                actor.leftLeg.rotation.x += (swing - actor.leftLeg.rotation.x) * blend;
-                changed ||= walking || Math.abs(turn) > 0.001;
+                const pose = playerAnimationPose(
+                    now,
+                    actor.data,
+                    moving,
+                    settings.animatePlayers
+                );
+                let poseSettling = false;
+                [
+                    [actor.model.position, "y", pose.modelY],
+                    [actor.body.rotation, "x", pose.bodyX],
+                    [actor.rightArm.rotation, "x", pose.rightArmX],
+                    [actor.leftArm.rotation, "x", pose.leftArmX],
+                    [actor.rightLeg.rotation, "x", pose.rightLegX],
+                    [actor.leftLeg.rotation, "x", pose.leftLegX]
+                ].forEach(([target, property, value]) => {
+                    const difference = value - target[property];
+                    poseSettling ||= Math.abs(difference) > 0.001;
+                    target[property] += difference * blend;
+                });
+                changed ||= pose.animated || poseSettling || Math.abs(turn) > 0.001;
             });
 
             entities.forEach(actor => {

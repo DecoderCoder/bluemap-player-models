@@ -108,7 +108,7 @@ final class BlueMapPlayerModelsServer {
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
     private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
-    private static final String WEB_ASSET_VERSION = "1.3.3";
+    private static final String WEB_ASSET_VERSION = "1.3.4";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
     private static final int RESOURCE_MANIFEST_FORMAT = 1;
     private static final int MAX_SKIN_BYTES = 2_000_000;
@@ -130,6 +130,7 @@ final class BlueMapPlayerModelsServer {
     private final AtomicBoolean publishing = new AtomicBoolean();
     private final Set<UUID> requestedSkins = ConcurrentHashMap.newKeySet();
     private final Set<String> publishedSkins = ConcurrentHashMap.newKeySet();
+    private final Set<UUID> recentSwings = ConcurrentHashMap.newKeySet();
     private final Map<UUID, String> skinAssets = new ConcurrentHashMap<>();
     private final Map<UUID, URI> skinSources = new ConcurrentHashMap<>();
     private final Map<UUID, Long> skinRetryAt = new ConcurrentHashMap<>();
@@ -195,6 +196,7 @@ final class BlueMapPlayerModelsServer {
     public void onPlayerLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
             snapshot(player, false);
+            recentSwings.remove(player.getUUID());
             saveState();
             publish();
         }
@@ -206,6 +208,11 @@ final class BlueMapPlayerModelsServer {
             return;
         }
 
+        server.getPlayerList().getPlayers().forEach(player -> {
+            if (isSwinging(player)) {
+                recentSwings.add(player.getUUID());
+            }
+        });
         ticks++;
         if (ticks % LIVE_UPDATE_TICKS == 0) {
             broadcastRealtimePlayers();
@@ -215,6 +222,7 @@ final class BlueMapPlayerModelsServer {
         }
 
         updateOnlinePlayers();
+        recentSwings.clear();
         updateEntities();
         publish();
     }
@@ -290,7 +298,12 @@ final class BlueMapPlayerModelsServer {
                         player.getYHeadRot(),
                         player.getXRot(),
                         player.getDeltaMovement().horizontalDistanceSqr() > 0.0004,
-                        player.isCrouching()
+                        player.isCrouching(),
+                        player.isSprinting(),
+                        isSwinging(player),
+                        player.getHealth(),
+                        player.getMaxHealth(),
+                        player.getFoodData().getFoodLevel()
                     )
                 )
             );
@@ -527,7 +540,13 @@ final class BlueMapPlayerModelsServer {
         data.profileName = player.getGameProfile().getName();
         data.online = online;
         data.moving = online && player.getDeltaMovement().horizontalDistanceSqr() > 0.0004;
-        data.crouching = player.isCrouching();
+        data.crouching = online && player.isCrouching();
+        data.sprinting = online && player.isSprinting();
+        data.swinging = online
+            && (isSwinging(player) || recentSwings.contains(player.getUUID()));
+        data.health = online ? player.getHealth() : null;
+        data.maxHealth = online ? player.getMaxHealth() : null;
+        data.foodLevel = online ? player.getFoodData().getFoodLevel() : null;
         data.leftHanded = player.getMainArm() == HumanoidArm.LEFT;
         data.x = player.getX();
         data.y = player.getY();
@@ -568,6 +587,11 @@ final class BlueMapPlayerModelsServer {
         }
         players.put(player.getUUID(), data);
         cacheSkin(player.getUUID(), data.profileName, skin.uri());
+    }
+
+    private static boolean isSwinging(ServerPlayer player) {
+        // ponytail: swings cover mining and attacks; track block interactions if mining-only is required.
+        return player.swinging || player.getAttackAnim(1.0F) > 0.0F;
     }
 
     private String worldId(ServerPlayer player, PlayerData previous) {
@@ -1573,6 +1597,13 @@ final class BlueMapPlayerModelsServer {
                 }
                 UUID uuid = UUID.fromString(player.uuid);
                 player.online = false;
+                player.moving = false;
+                player.crouching = false;
+                player.sprinting = false;
+                player.swinging = false;
+                player.health = null;
+                player.maxHealth = null;
+                player.foodLevel = null;
                 String skinPrefix = SKIN_ASSET_ROOT + "/" + uuid + "-";
                 if (player.skin != null
                     && player.skin.startsWith(skinPrefix)
@@ -1646,7 +1677,12 @@ final class BlueMapPlayerModelsServer {
         float yaw,
         float pitch,
         boolean moving,
-        boolean crouching
+        boolean crouching,
+        boolean sprinting,
+        boolean swinging,
+        float health,
+        float maxHealth,
+        int foodLevel
     ) {}
 
     private record State(List<PlayerData> players) {}
@@ -1671,6 +1707,11 @@ final class BlueMapPlayerModelsServer {
         boolean online;
         boolean moving;
         boolean crouching;
+        boolean sprinting;
+        boolean swinging;
+        Float health;
+        Float maxHealth;
+        Integer foodLevel;
         boolean leftHanded;
         double x;
         double y;

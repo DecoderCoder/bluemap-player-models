@@ -28,8 +28,10 @@ const {
     modelOverrideMatches,
     normalizeResourceId,
     normalizeInterval,
+    playerAnimationPose,
     playerDataUrl,
     playerLiveUrl,
+    playerVitalsText,
     resolveTextureReference,
     syncSlotNodes,
     splitId
@@ -69,7 +71,12 @@ const currentMotion = {
     yaw: 6,
     pitch: 5,
     moving: true,
+    sprinting: true,
     crouching: true,
+    swinging: true,
+    health: 18.5,
+    maxHealth: 20,
+    foodLevel: 14,
     lastSeen: 200
 };
 assert.deepEqual(
@@ -113,6 +120,75 @@ assert.equal(interpolationSpeed(10, 1000), 0.01);
 assert.equal(interpolationSpeed(2, 1000), 0.002);
 assert.equal(interpolationSpeed(-1, 1000), 0);
 assert.equal(interpolationSpeed(10, 0), 10);
+const walkPose = playerAnimationPose(
+    Math.PI / (2 * 0.012),
+    {online: true, moving: true},
+    false,
+    true
+);
+const runPose = playerAnimationPose(
+    Math.PI / (2 * 0.018),
+    {online: true, moving: true, sprinting: true},
+    false,
+    true
+);
+assert.equal(walkPose.running, false);
+assert.equal(runPose.running, true);
+assert.ok(Math.abs(runPose.rightLegX) > Math.abs(walkPose.rightLegX));
+assert.deepEqual(
+    playerAnimationPose(0, {online: true, crouching: true}, false, true),
+    {
+        animated: false,
+        running: false,
+        mining: false,
+        modelY: -0.16,
+        bodyX: 0.45,
+        rightArmX: 0.35,
+        leftArmX: 0.35,
+        rightLegX: -0.45,
+        leftLegX: -0.45
+    }
+);
+assert.equal(
+    playerAnimationPose(0, {online: true, crouching: true}, false, false).bodyX,
+    0
+);
+assert.equal(
+    playerAnimationPose(
+        0,
+        {online: true, swinging: true, leftHanded: false},
+        false,
+        true
+    ).rightArmX,
+    -1.05
+);
+assert.equal(
+    playerAnimationPose(
+        0,
+        {online: true, swinging: true, leftHanded: true},
+        false,
+        true
+    ).leftArmX,
+    -1.05
+);
+assert.equal(
+    playerVitalsText({
+        online: true,
+        health: 18.5,
+        maxHealth: 20,
+        foodLevel: 14
+    }),
+    "Health 18.5/20 · Hunger 14/20"
+);
+assert.equal(
+    playerVitalsText({online: true, health: 0, maxHealth: 20, foodLevel: 0}),
+    "Health 0/20 · Hunger 0/20"
+);
+assert.equal(
+    playerVitalsText({online: false, health: 18, maxHealth: 20, foodLevel: 14}),
+    ""
+);
+assert.equal(playerVitalsText({online: true}), "");
 assert.deepEqual(splitId("minecraft:diamond_sword"), {
     namespace: "minecraft",
     path: "diamond_sword"

@@ -414,6 +414,19 @@
     opacity: 1;
 }
 
+.bpm-player-label-copy {
+    display: grid;
+    gap: 0.1em;
+    line-height: 1.05;
+    text-align: left;
+}
+
+.bpm-player-vitals {
+    color: var(--theme-fg-light);
+    font-size: 0.72em;
+    font-variant-numeric: tabular-nums;
+}
+
 .bpm-player-label img {
     width: 1.5em;
     height: 1.5em;

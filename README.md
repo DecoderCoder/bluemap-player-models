@@ -6,12 +6,13 @@ models and loaded entities to the map.
 ## Features
 
 - Skin-textured 3D player models on interval-synchronized position anchors
-- Walking animation, head pitch, smooth follow, and a followed player's look ray
+- Walk, run, crouch, and mining animations, head pitch, smooth follow, and a
+  followed player's look ray
 - Extracted vanilla, mod, and configured resource-pack textures and model JSON
 - JSON item models for inventory and label icons, including layers, block elements,
   parent inheritance, damage/custom-model-data overrides, and common item tints
 - Exact default armor-material textures, overlays, and trims
-- Player labels with the skin head on the left and held-item icon on the right
+- Player labels with optional online health and hunger below the nickname
 - Click a player for Inventory, Center, and Follow actions
 - Gray offline players at their saved logout positions
 - Logout snapshots persisted in the world's `data` folder
@@ -56,7 +57,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.3.3.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.3.4.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 
@@ -95,10 +96,10 @@ logs; ordinary BlueMap requests are unchanged.
 
 ## Privacy
 
-Complete inventories are included in the map's JSON asset so the browser can
-render them; they are not access-controlled separately from BlueMap. Do not
-deploy this add-on on a public map unless publishing player inventories is
-intentional.
+Complete inventories and online health/hunger values are included in the map's
+JSON asset so the browser can render them; they are not access-controlled
+separately from BlueMap. Do not deploy this add-on on a public map unless
+publishing this player data is intentional.
 
 The extracted vanilla, mod, and configured-pack client assets are also
 published beneath the public BlueMap web root. Do not put private material in a
