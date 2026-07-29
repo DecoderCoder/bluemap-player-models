@@ -6,7 +6,9 @@ global.__BPM_TEST__ = true;
 const source = fs.readFileSync("src/main/resources/web/player-models.js", "utf8");
 vm.runInThisContext(source);
 assert.doesNotMatch(source, /playerheads\/|minecraft\/assets\/|pending/);
-assert.match(source, /if \(wasConnected\) retryRealtime\(token\);/);
+assert.match(source, /realtimeRetryMs = Math\.min\(realtimeRetryMs \* 2, 60000\)/);
+assert.doesNotMatch(source, /if \(wasConnected\) retryRealtime\(token\);/);
+assert.doesNotMatch(source, /new window\.WebSocket/);
 
 const {
     armorTextureKey,
@@ -27,7 +29,7 @@ const {
     normalizeResourceId,
     normalizeInterval,
     playerDataUrl,
-    playerSocketUrl,
+    playerLiveUrl,
     resolveTextureReference,
     syncSlotNodes,
     splitId
@@ -53,12 +55,12 @@ assert.equal(
     "maps/world/assets/bluemap-player-models/players.json"
 );
 assert.equal(
-    playerSocketUrl("http://example.test/maps/world"),
-    "ws://example.test/bluemap-player-models/ws"
+    playerLiveUrl("http://example.test/maps/world", "world", 7),
+    "http://example.test/bluemap-player-models/live?mapId=world&after=7"
 );
 assert.equal(
-    playerSocketUrl("https://example.test:8443/maps/world"),
-    "wss://example.test:8443/bluemap-player-models/ws"
+    playerLiveUrl("https://example.test:8443/maps/world", "world 2", 9),
+    "https://example.test:8443/bluemap-player-models/live?mapId=world+2&after=9"
 );
 const currentMotion = {
     x: 9,

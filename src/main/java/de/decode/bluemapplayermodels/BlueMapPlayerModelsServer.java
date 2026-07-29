@@ -96,6 +96,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 final class BlueMapPlayerModelsServer {
     private static final Logger LOGGER = LogUtils.getLogger();
@@ -107,12 +108,13 @@ final class BlueMapPlayerModelsServer {
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
     private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
-    private static final String WEB_ASSET_VERSION = "1.3.2";
+    private static final String WEB_ASSET_VERSION = "1.3.3";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
     private static final int RESOURCE_MANIFEST_FORMAT = 1;
     private static final int MAX_SKIN_BYTES = 2_000_000;
     private static final int MAX_PROFILE_BYTES = 64_000;
     private static final int ENTITY_LIMIT = 128;
+    private static final int LIVE_UPDATE_TICKS = 2;
     private static final long SKIN_RETRY_DELAY_MS = 60_000;
     private static final long SKIN_REFRESH_MS = 24 * 60 * 60 * 1_000L;
     private static final Pattern DATA_PATH = Pattern.compile(
@@ -139,7 +141,7 @@ final class BlueMapPlayerModelsServer {
     private volatile Map<String, List<EntityData>> entitiesByWorld = Map.of();
     private volatile Path skinRoot;
     private MinecraftServer server;
-    private PlayerWebSocketServer playerWebSocketServer;
+    private volatile PlayerLiveUpdates playerLiveUpdates;
     private Path stateFile;
     private int ticks;
 
@@ -148,6 +150,7 @@ final class BlueMapPlayerModelsServer {
         BlueMapAPI.onEnable(this::enableBlueMap);
         BlueMapAPI.onDisable(api -> {
             if (blueMap == api) {
+                closeLiveUpdates();
                 apiGeneration++;
                 blueMap = null;
                 entitiesByWorld = Map.of();
@@ -163,8 +166,6 @@ final class BlueMapPlayerModelsServer {
         stateFile = server.getWorldPath(LevelResource.ROOT)
             .resolve("data")
             .resolve(ASSET_ROOT + ".json");
-        playerWebSocketServer = new PlayerWebSocketServer();
-        playerWebSocketServer.start();
         loadState();
         importStoredPlayers();
         updateOnlinePlayers();
@@ -177,10 +178,7 @@ final class BlueMapPlayerModelsServer {
         event.getServer().getPlayerList().getPlayers().forEach(player -> snapshot(player, false));
         saveState();
         entitiesByWorld = Map.of();
-        if (playerWebSocketServer != null) {
-            playerWebSocketServer.close();
-            playerWebSocketServer = null;
-        }
+        closeLiveUpdates();
         server = null;
         skinExecutor.shutdownNow();
         publicationExecutor.shutdown();
@@ -208,8 +206,11 @@ final class BlueMapPlayerModelsServer {
             return;
         }
 
-        broadcastRealtimePlayers();
-        if (++ticks % 20 != 0) {
+        ticks++;
+        if (ticks % LIVE_UPDATE_TICKS == 0) {
+            broadcastRealtimePlayers();
+        }
+        if (ticks % 20 != 0) {
             return;
         }
 
@@ -235,6 +236,7 @@ final class BlueMapPlayerModelsServer {
             publishedSkins.clear();
             skinRetryAt.clear();
             blueMap = api;
+            installLiveUpdates(api);
             importStoredPlayers();
             publish();
             LOGGER.info("BlueMap Player Models {} web assets installed", WEB_ASSET_VERSION);
@@ -260,14 +262,14 @@ final class BlueMapPlayerModelsServer {
     }
 
     private void broadcastRealtimePlayers() {
-        PlayerWebSocketServer socket = playerWebSocketServer;
+        PlayerLiveUpdates liveUpdates = playerLiveUpdates;
         MinecraftServer currentServer = server;
         BlueMapAPI api = blueMap;
-        if (socket == null || currentServer == null || api == null) {
+        if (liveUpdates == null || currentServer == null || api == null) {
             return;
         }
 
-        Set<String> subscriptions = socket.subscribedMaps();
+        Set<String> subscriptions = liveUpdates.subscribedMaps();
         if (subscriptions.isEmpty()) {
             return;
         }
@@ -296,7 +298,7 @@ final class BlueMapPlayerModelsServer {
 
         for (BlueMapMap map : api.getMaps()) {
             if (subscriptions.contains(map.getId())) {
-                socket.broadcast(
+                liveUpdates.publish(
                     map.getId(),
                     GSON.toJson(new LivePayload(
                         updatedAt,
@@ -304,6 +306,31 @@ final class BlueMapPlayerModelsServer {
                         playersByWorld.getOrDefault(map.getWorld().getId(), List.of())
                     ))
                 );
+            }
+        }
+    }
+
+    private void installLiveUpdates(BlueMapAPI api) {
+        closeLiveUpdates();
+        try {
+            playerLiveUpdates = PlayerLiveUpdates.install(
+                api,
+                api.getMaps().stream().map(BlueMapMap::getId).collect(Collectors.toSet())
+            );
+            LOGGER.info("BETA live updates registered on BlueMap's webserver");
+        } catch (RuntimeException exception) {
+            LOGGER.warn("Could not register BETA live updates on BlueMap's webserver", exception);
+        }
+    }
+
+    private void closeLiveUpdates() {
+        PlayerLiveUpdates liveUpdates = playerLiveUpdates;
+        playerLiveUpdates = null;
+        if (liveUpdates != null) {
+            try {
+                liveUpdates.close();
+            } catch (RuntimeException exception) {
+                LOGGER.warn("Could not restore BlueMap's HTTP handler", exception);
             }
         }
     }

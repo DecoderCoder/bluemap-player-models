@@ -59,13 +59,6 @@ repositories {
 dependencies {
     minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
     compileOnly "de.bluecolored.bluemap:BlueMapAPI:${bluemap_compile_api_version}"
-    minecraftLibrary(group: 'org.java-websocket', name: 'Java-WebSocket', version: '1.6.0') {
-        transitive = false
-    }
-    jarJar(group: 'org.java-websocket', name: 'Java-WebSocket', version: '[1.6,2.0)') {
-        jarJar.pin(it, '1.6.0')
-        transitive = false
-    }
 }
 
 tasks.named('processResources', ProcessResources).configure {
@@ -123,4 +116,14 @@ tasks.named('jar', Jar).configure {
 tasks.named('jarJar').configure {
     archiveClassifier = ''
     finalizedBy 'reobfJarJar'
+}
+
+tasks.register('testLiveUpdates', JavaExec) {
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'de.decode.bluemapplayermodels.PlayerLiveUpdatesSelfTest'
+}
+
+tasks.named('check').configure {
+    dependsOn tasks.named('testLiveUpdates')
 }

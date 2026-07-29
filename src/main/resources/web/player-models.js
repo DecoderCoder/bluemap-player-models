@@ -1,10 +1,10 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.3.2";
+    const VERSION = "1.3.3";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
-    const PLAYER_SOCKET_PATH = "/bluemap-player-models/ws";
+    const PLAYER_LIVE_PATH = "/bluemap-player-models/live";
     const STORAGE_KEY = "bluemap-player-models-settings-v2";
     const REFRESH_INTERVALS = [1000, 2000, 5000, 10000, 30000];
     const PLAYER_MOTION_FIELDS = [
@@ -58,9 +58,10 @@
     const interpolationSpeed = (distance, interval) =>
         Math.max(0, distance) / Math.max(1, interval);
 
-    const playerSocketUrl = href => {
-        const url = new URL(PLAYER_SOCKET_PATH, href);
-        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    const playerLiveUrl = (href, mapId, after) => {
+        const url = new URL(PLAYER_LIVE_PATH, href);
+        url.searchParams.set("mapId", mapId);
+        url.searchParams.set("after", String(after));
         return url.href;
     };
 
@@ -391,7 +392,7 @@
             normalizeResourceId,
             normalizeInterval,
             playerDataUrl,
-            playerSocketUrl,
+            playerLiveUrl,
             mergePlayerMotion,
             resolveTextureReference,
             syncSlotNodes,
@@ -433,10 +434,12 @@
         let refreshTimer = null;
         let mapId = null;
         let generation = 0;
-        let realtimeSocket = null;
+        let realtimeRequest = null;
         let realtimeRetryTimer = null;
+        let realtimeRetryMs = 5000;
         let realtimeConnected = false;
         let realtimeUnavailable = false;
+        let realtimeSequence = 0;
         let selectedPlayerId = null;
         let lastStatus = "";
         let resourceManifest = {generation: VERSION, models: {}, textures: {}, metadata: {}};
@@ -498,7 +501,7 @@
                 ["offlinePlayers", "Offline players", "Keep logout positions in gray"],
                 ["entities", "Entities", "Show loaded non-player entities"],
                 ["labels", "Player labels", "Show skin, name, and held item"],
-                ["realTimePlayers", "BETA", "Real time; requires a WebSocket reverse proxy"]
+                ["realTimePlayers", "BETA", "Real time on the BlueMap port"]
             ];
             const list = ui.querySelector("#bpm-settings-list");
             for (const [key, label, detail] of definitions) {
@@ -2146,7 +2149,7 @@
             if (realtimeConnected) {
                 setStatus("ok", "Connected - BETA real-time");
             } else if (settings.realTimePlayers && realtimeUnavailable) {
-                setStatus("waiting", "BETA unavailable - check proxy; polling continues");
+                setStatus("waiting", "BETA unavailable - polling continues");
             } else {
                 setStatus(
                     "ok",
@@ -2159,13 +2162,15 @@
         function closeRealtime() {
             clearTimeout(realtimeRetryTimer);
             realtimeRetryTimer = null;
-            const socket = realtimeSocket;
-            realtimeSocket = null;
+            realtimeRetryMs = 5000;
+            const request = realtimeRequest;
+            realtimeRequest = null;
             const wasConnected = realtimeConnected;
             const wasUnavailable = realtimeUnavailable;
             realtimeConnected = false;
             realtimeUnavailable = false;
-            socket?.close();
+            realtimeSequence = 0;
+            request?.abort();
             if (wasConnected || wasUnavailable) {
                 setStatus("waiting", "BETA disabled - polling continues");
             }
@@ -2173,52 +2178,54 @@
 
         function retryRealtime(token) {
             if (realtimeRetryTimer || token !== generation || !settings.realTimePlayers) return;
+            const delay = realtimeRetryMs;
+            realtimeRetryMs = Math.min(realtimeRetryMs * 2, 60000);
             realtimeRetryTimer = setTimeout(() => {
                 realtimeRetryTimer = null;
                 connectRealtime();
-            }, 5000);
+            }, delay);
         }
 
         function connectRealtime() {
             if (!settings.realTimePlayers
                 || !mapId
-                || realtimeSocket
-                || !("WebSocket" in window)) {
+                || realtimeRequest) {
                 return;
             }
 
             const token = generation;
-            let socket;
+            const requestedMap = mapId;
+            const request = new AbortController();
+            realtimeRequest = request;
             realtimeUnavailable = false;
-            try {
-                socket = new window.WebSocket(playerSocketUrl(window.location.href));
-            } catch {
-                realtimeUnavailable = true;
-                setStatus("waiting", "BETA unavailable - check proxy; polling continues");
-                return;
-            }
-            realtimeSocket = socket;
+            void readRealtime(request, token, requestedMap);
+        }
 
-            socket.addEventListener("open", () => {
-                if (socket !== realtimeSocket
-                    || token !== generation
-                    || !settings.realTimePlayers) {
-                    socket.close();
-                    return;
-                }
-                socket.send(JSON.stringify({mapId}));
-            });
-            socket.addEventListener("message", event => {
-                if (socket !== realtimeSocket || token !== generation) return;
-                try {
-                    const payload = JSON.parse(event.data);
+        async function readRealtime(request, token, requestedMap) {
+            try {
+                while (request === realtimeRequest
+                    && token === generation
+                    && settings.realTimePlayers) {
+                    const response = await fetch(
+                        playerLiveUrl(window.location.href, requestedMap, realtimeSequence),
+                        {cache: "no-store", signal: request.signal}
+                    );
+                    if (response.status === 204) continue;
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const sequence = Number(response.headers.get("X-BPM-Sequence"));
+                    const payload = await response.json();
                     const sampledAt = Number(payload?.updatedAt);
-                    if (payload?.mapId !== mapId
+                    if (request !== realtimeRequest || token !== generation) return;
+                    if (payload?.mapId !== requestedMap
+                        || !Number.isSafeInteger(sequence)
+                        || sequence <= realtimeSequence
                         || !Number.isFinite(sampledAt)
                         || !Array.isArray(payload.players)) {
-                        return;
+                        throw new Error("Invalid BETA live response");
                     }
 
+                    realtimeSequence = sequence;
+                    realtimeRetryMs = 5000;
                     realtimeConnected = true;
                     realtimeUnavailable = false;
                     setStatus("ok", "Connected - BETA real-time");
@@ -2239,20 +2246,20 @@
                         changed = true;
                     }
                     if (changed) app.mapViewer.redraw();
-                } catch {
-                    // Ignore malformed frames and keep the polling fallback active.
                 }
-            });
-            socket.addEventListener("error", () => socket.close());
-            socket.addEventListener("close", () => {
-                if (socket !== realtimeSocket) return;
-                const wasConnected = realtimeConnected;
-                realtimeSocket = null;
+            } catch (error) {
+                if (error.name === "AbortError"
+                    || request !== realtimeRequest
+                    || token !== generation) {
+                    return;
+                }
+                realtimeRequest = null;
                 realtimeConnected = false;
                 realtimeUnavailable = true;
-                setStatus("waiting", "BETA unavailable - check proxy; polling continues");
-                if (wasConnected) retryRealtime(token);
-            });
+                realtimeSequence = 0;
+                setStatus("waiting", "BETA unavailable - polling continues");
+                retryRealtime(token);
+            }
         }
 
         function queueNextRefresh() {

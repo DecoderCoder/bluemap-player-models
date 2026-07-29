@@ -56,7 +56,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.3.2.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.3.3.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 
@@ -71,44 +71,27 @@ profile, with BlueMap's configured skin provider as a fallback. Fingerprinted
 PNGs are cached through every map's BlueMap asset storage. Skin heads are cut
 from the same full skin in the browser, so the label and 3D model stay in sync.
 
-## BETA real-time updates
+## BETA same-port live updates
 
 Real-time movement is disabled by default. Turn on the `BETA` switch in the
 Player Models settings to use it; normal JSON polling remains active for
 metadata and automatic fallback.
 
-The WebSocket backend listens on `127.0.0.1:8101`. BlueMap's built-in server
-cannot attach it to the port BlueMap already owns. To use the same public port,
-let a reverse proxy own that port, move BlueMap's built-in listener to a private
-port such as `127.0.0.1:8102`, and route both services. For nginx:
+The add-on registers `/bluemap-player-models/live` directly on BlueMap 5.12's
+built-in webserver. It automatically uses the same origin and port as the map,
+including `http://direct.decodercoder.com:8100/`. No second public port or
+reverse proxy is needed.
 
-```nginx
-server {
-    listen 8100;
+BlueMap 5.12 does not expose raw connections for a WebSocket upgrade, so this
+mode uses one long-lived HTTP request that completes on the next movement
+snapshot and is immediately renewed. Movement still arrives in real time
+without interval polling. The route uses BlueMap 5.12's implementation API,
+which is why the required BlueMap version is pinned above.
 
-    location = /bluemap-player-models/ws {
-        proxy_pass http://127.0.0.1:8101;
-        proxy_http_version 1.1;
-        proxy_set_header Host $http_host;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:8102;
-        proxy_set_header Host $http_host;
-    }
-}
-```
-
-If BlueMap is private, repeat its authentication and access-control directives
-inside this exact location; rules in a sibling BlueMap location do not apply.
-Without the WebSocket route, BETA makes one connection attempt and keeps using
-polling.
-Set a different backend with the JVM options
-`-Dbluemap-player-models.websocket-address=127.0.0.1` and
-`-Dbluemap-player-models.websocket-port=8101`. Keep the listener private and
-expose only the proxied path.
+The live route exposes the same visible player coordinates as the map. If HTTP
+access control is added later, it must cover `/bluemap-player-models/live` too.
+Live traffic is excluded from BlueMap's activity log to avoid high-volume access
+logs; ordinary BlueMap requests are unchanged.
 
 ## Privacy
 
