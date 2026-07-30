@@ -91,7 +91,7 @@ metadata and automatic fallback.
 
 The add-on registers `/bluemap-player-models/live` directly on BlueMap 5.12's
 built-in webserver. It automatically uses the same origin and port as the map,
-including `http://direct.decodercoder.com:8100/`. No second public port or
+including `https://map.example.com/`. No second public port or
 reverse proxy is needed.
 
 BlueMap 5.12 does not expose raw connections for a WebSocket upgrade, so this
