@@ -3,6 +3,16 @@
 A server-side Forge 1.20.1 add-on for BlueMap 5.12 that adds animated player
 models and loaded entities to the map.
 
+## Screenshots
+
+Animated player models, equipment, and vitals:
+
+![Animated player model with equipment and vitals](docs/screenshots/player-model-vitals.png)
+
+Loaded entities rendered alongside players:
+
+![Player model and loaded entities on BlueMap](docs/screenshots/player-model-and-entities.png)
+
 ## Features
 
 - Skin-textured 3D player models on interval-synchronized position anchors
