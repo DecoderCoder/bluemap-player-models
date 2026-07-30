@@ -12,7 +12,7 @@ models and loaded entities to the map.
 - JSON item models for inventory and label icons, including layers, block elements,
   parent inheritance, damage/custom-model-data overrides, and common item tints
 - Exact default armor-material textures, overlays, and trims
-- Player labels with optional online health and hunger below the nickname
+- Player labels with optional heart and food trackers below the nickname
 - Click a player for Inventory, Center, and Follow actions
 - Gray offline players at their saved logout positions
 - Logout snapshots persisted in the world's `data` folder
@@ -57,7 +57,7 @@ Use `bluemap-5.12-mc1.20-6-forge.jar`; the unqualified
 ## Install
 
 1. Build with `gradlew.bat build` on Windows or `./gradlew build` elsewhere.
-2. Copy `build/libs/bluemap_player_models-1.3.5.jar` into the server's `mods`
+2. Copy `build/libs/bluemap_player_models-1.3.6.jar` into the server's `mods`
    folder beside `bluemap-5.12-mc1.20-6-forge.jar`.
 3. Start the server. No client installation or manual webapp edit is needed.
 
@@ -71,6 +71,17 @@ Full skins use the signed texture URL already present in each online player's
 profile, with BlueMap's configured skin provider as a fallback. Fingerprinted
 PNGs are cached through every map's BlueMap asset storage. Skin heads are cut
 from the same full skin in the browser, so the label and 3D model stay in sync.
+
+## Configuration
+
+Forge creates `config/bluemap_player_models-common.toml` on first start. Its
+`defaults` section contains every Player Models panel toggle and both refresh
+intervals. For example, set `playerVitals = true` to show the heart and food
+trackers by default, or set any feature to `false` to default it off.
+
+These are defaults, not locks: settings already saved in a visitor's browser
+take precedence. Clear that site's browser storage to apply new defaults to an
+existing visitor, and restart the server after changing the file.
 
 ## BETA same-port live updates
 

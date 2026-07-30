@@ -4,6 +4,7 @@ import net.minecraftforge.api.distmarker.Dist;
 import net.minecraftforge.fml.DistExecutor;
 import net.minecraftforge.fml.IExtensionPoint;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 
 @Mod(BlueMapPlayerModels.MOD_ID)
@@ -12,6 +13,7 @@ public final class BlueMapPlayerModels {
 
     public BlueMapPlayerModels(FMLJavaModLoadingContext context) {
         context.registerDisplayTest(IExtensionPoint.DisplayTest.IGNORE_SERVER_VERSION);
+        context.registerConfig(ModConfig.Type.COMMON, BlueMapPlayerModelsConfig.SPEC);
         DistExecutor.unsafeRunWhenOn(Dist.DEDICATED_SERVER, () -> BlueMapPlayerModelsServer::new);
     }
 }

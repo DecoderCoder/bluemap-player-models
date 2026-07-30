@@ -422,9 +422,47 @@
 }
 
 .bpm-player-vitals {
+    display: flex;
+    align-items: center;
+    gap: 0.35em;
     color: var(--theme-fg-light);
     font-size: 0.72em;
     font-variant-numeric: tabular-nums;
+}
+
+.bpm-player-vitals[hidden] {
+    display: none;
+}
+
+.bpm-vital {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2em;
+    padding: 0.15em 0.35em 0.15em 0.25em;
+    border: 1px solid;
+    border-radius: 1em;
+    font-weight: 600;
+    line-height: 1;
+    text-shadow: 0 1px 1px #0008;
+}
+
+.bpm-vital svg {
+    width: 0.9em;
+    height: 0.9em;
+    flex: 0 0 auto;
+    fill: currentColor;
+}
+
+.bpm-vital-health {
+    color: #ff6b75;
+    background: #d64d5a26;
+    border-color: #ff6b7555;
+}
+
+.bpm-vital-hunger {
+    color: #f2b85b;
+    background: #d88b3526;
+    border-color: #f2b85b55;
 }
 
 .bpm-player-label img {

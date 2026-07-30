@@ -9,6 +9,7 @@ assert.doesNotMatch(source, /playerheads\/|minecraft\/assets\/|pending/);
 assert.match(source, /realtimeRetryMs = Math\.min\(realtimeRetryMs \* 2, 60000\)/);
 assert.doesNotMatch(source, /if \(wasConnected\) retryRealtime\(token\);/);
 assert.doesNotMatch(source, /new window\.WebSocket/);
+assert.match(source, /vitals\.setAttribute\("role", "img"\)/);
 
 const {
     advanceWalkAnimation,
@@ -34,6 +35,7 @@ const {
     playerDataUrl,
     playerLiveUrl,
     playerSettings,
+    playerVitals,
     playerVitalsText,
     resolveTextureReference,
     sampledHorizontalSpeed,
@@ -121,18 +123,17 @@ assert.equal(minecraftSkinUrl("https://example.com/texture/abcdef"), null);
 assert.equal(normalizeInterval(5000), 5000);
 assert.equal(normalizeInterval(0), 1000);
 assert.equal(playerSettings({}).realTimePlayers, true);
-const migratedSettings = playerSettings({realTimePlayers: false, labels: false});
+const configuredSettings = playerSettings(
+    {labels: false},
+    {labels: true, realTimePlayers: false, playerRefreshMs: 5000}
+);
 assert.deepEqual(
     {
-        labels: migratedSettings.labels,
-        realTimePlayers: migratedSettings.realTimePlayers,
-        realTimeDefaultVersion: migratedSettings.realTimeDefaultVersion
+        labels: configuredSettings.labels,
+        realTimePlayers: configuredSettings.realTimePlayers,
+        playerRefreshMs: configuredSettings.playerRefreshMs
     },
-    {labels: false, realTimePlayers: true, realTimeDefaultVersion: 1}
-);
-assert.equal(
-    playerSettings({...migratedSettings, realTimePlayers: false}).realTimePlayers,
-    false
+    {labels: false, realTimePlayers: false, playerRefreshMs: 5000}
 );
 assert.equal(interpolationSpeed(10, 1000), 0.01);
 assert.equal(interpolationSpeed(2, 1000), 0.002);
@@ -247,6 +248,14 @@ assert.equal(
     }),
     "Health 18.5/20 · Hunger 14/20"
 );
+assert.deepEqual(
+    playerVitals({online: true, health: 18.5, maxHealth: 20, foodLevel: 14}),
+    {
+        health: "18.5/20",
+        hunger: "14/20",
+        label: "Health 18.5/20 · Hunger 14/20"
+    }
+);
 assert.equal(
     playerVitalsText({online: true, health: 0, maxHealth: 20, foodLevel: 0}),
     "Health 0/20 · Hunger 0/20"
@@ -256,6 +265,7 @@ assert.equal(
     ""
 );
 assert.equal(playerVitalsText({online: true}), "");
+assert.equal(playerVitals({online: true}), null);
 assert.deepEqual(splitId("minecraft:diamond_sword"), {
     namespace: "minecraft",
     path: "diamond_sword"

@@ -108,7 +108,7 @@ final class BlueMapPlayerModelsServer {
     private static final String ASSET_ROOT = "bluemap-player-models";
     private static final String PLAYER_DATA_ASSET = ASSET_ROOT + "/players.json";
     private static final String SKIN_ASSET_ROOT = ASSET_ROOT + "/skins";
-    private static final String WEB_ASSET_VERSION = "1.3.5";
+    private static final String WEB_ASSET_VERSION = "1.3.6";
     private static final String MINECRAFT_CLIENT = "minecraft-client-1.20.1.jar";
     private static final int RESOURCE_MANIFEST_FORMAT = 1;
     private static final int MAX_SKIN_BYTES = 2_000_000;
@@ -230,10 +230,9 @@ final class BlueMapPlayerModelsServer {
     private void enableBlueMap(BlueMapAPI api) {
         try {
             Path root = api.getWebApp().getWebRoot();
-            String script = "player-models-" + WEB_ASSET_VERSION + ".js";
+            String script = writeConfiguredScript(root.resolve(ASSET_ROOT));
             String style = "player-models-" + WEB_ASSET_VERSION + ".css";
             String entityModels = "entity-models-" + WEB_ASSET_VERSION + ".json";
-            copyResource("/web/player-models.js", root.resolve(ASSET_ROOT).resolve(script));
             copyResource("/web/player-models.css", root.resolve(ASSET_ROOT).resolve(style));
             copyResource("/web/entity-models.json", root.resolve(ASSET_ROOT).resolve(entityModels));
             publishClientResources(root.resolve(ASSET_ROOT));
@@ -251,6 +250,25 @@ final class BlueMapPlayerModelsServer {
         } catch (IOException exception) {
             LOGGER.error("Failed to install BlueMap Player Models web assets", exception);
         }
+    }
+
+    private static String writeConfiguredScript(Path root) throws IOException {
+        Files.createDirectories(root);
+        String source;
+        try (InputStream input =
+                 BlueMapPlayerModelsServer.class.getResourceAsStream("/web/player-models.js")) {
+            if (input == null) {
+                throw new IOException("Missing bundled resource /web/player-models.js");
+            }
+            source = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        String script = "window.__blueMapPlayerModelsDefaults = "
+            + GSON.toJson(BlueMapPlayerModelsConfig.browserDefaults()) + ";\n" + source;
+        byte[] content = script.getBytes(StandardCharsets.UTF_8);
+        String hash = HexFormat.of().formatHex(sha256().digest(content), 0, 8);
+        String fileName = "player-models-" + WEB_ASSET_VERSION + "-" + hash + ".js";
+        Files.write(root.resolve(fileName), content);
+        return fileName;
     }
 
     private static void copyResource(String resource, Path target) throws IOException {

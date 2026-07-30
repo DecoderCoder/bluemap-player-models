@@ -1,7 +1,7 @@
 (() => {
     "use strict";
 
-    const VERSION = "1.3.5";
+    const VERSION = "1.3.6";
     const PIXEL = 0.05625;
     const DATA_ASSET = "assets/bluemap-player-models/players.json";
     const PLAYER_LIVE_PATH = "/bluemap-player-models/live";
@@ -56,11 +56,13 @@
         return REFRESH_INTERVALS.includes(interval) ? interval : 1000;
     };
 
-    const playerSettings = stored => {
+    const playerSettings = (stored, defaults) => {
         const source = stored && typeof stored === "object" && !Array.isArray(stored)
             ? stored
             : {};
-        const migrated = Number(source.realTimeDefaultVersion) >= 1;
+        const configured = defaults && typeof defaults === "object" && !Array.isArray(defaults)
+            ? defaults
+            : {};
         const settings = {
             playerModels: true,
             animatePlayers: true,
@@ -72,10 +74,9 @@
             realTimePlayers: true,
             playerRefreshMs: 1000,
             entityRefreshMs: 1000,
+            ...configured,
             ...source
         };
-        if (!migrated) settings.realTimePlayers = true;
-        settings.realTimeDefaultVersion = 1;
         settings.playerRefreshMs = normalizeInterval(settings.playerRefreshMs);
         settings.entityRefreshMs = normalizeInterval(settings.entityRefreshMs);
         return settings;
@@ -115,7 +116,7 @@
         };
     };
 
-    const playerVitalsText = data => {
+    const playerVitals = data => {
         const health = Number(data?.health);
         const maxHealth = Number(data?.maxHealth);
         const foodLevel = Number(data?.foodLevel);
@@ -126,12 +127,18 @@
             || health < 0
             || maxHealth <= 0
             || foodLevel < 0) {
-            return "";
+            return null;
         }
         const format = value => Number.isInteger(value) ? String(value) : value.toFixed(1);
-        return `Health ${format(health)}/${format(maxHealth)}`
-            + ` · Hunger ${Math.min(20, Math.round(foodLevel))}/20`;
+        const values = {
+            health: `${format(health)}/${format(maxHealth)}`,
+            hunger: `${Math.min(20, Math.round(foodLevel))}/20`
+        };
+        values.label = `Health ${values.health} · Hunger ${values.hunger}`;
+        return values;
     };
+
+    const playerVitalsText = data => playerVitals(data)?.label || "";
 
     const playerAnimationPose = (walkPosition, walkAmount, now, data, enabled) => {
         const online = !!data?.online;
@@ -512,6 +519,7 @@
             playerDataUrl,
             playerLiveUrl,
             playerSettings,
+            playerVitals,
             playerVitalsText,
             mergePlayerMotion,
             resolveTextureReference,
@@ -586,9 +594,12 @@
 
         function loadSettings() {
             try {
-                return playerSettings(JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"));
+                return playerSettings(
+                    JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"),
+                    window.__blueMapPlayerModelsDefaults
+                );
             } catch {
-                return playerSettings();
+                return playerSettings(null, window.__blueMapPlayerModelsDefaults);
             }
         }
 
@@ -1326,7 +1337,22 @@
             name.className = "bpm-player-name";
             name.textContent = data.name;
             vitals.className = "bpm-player-vitals";
+            vitals.setAttribute("role", "img");
             vitals.hidden = true;
+            vitals.innerHTML = `
+                <span class="bpm-vital bpm-vital-health" title="Health" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                        <path d="M12 21S4.5 16.4 2.5 12C.9 8.4 3.2 4 7.2 4c2.1 0 3.8 1.2 4.8 2.7C13 5.2 14.7 4 16.8 4c4 0 6.3 4.4 4.7 8C19.5 16.4 12 21 12 21Z"/>
+                    </svg>
+                    <span class="bpm-vital-value"></span>
+                </span>
+                <span class="bpm-vital bpm-vital-hunger" title="Hunger" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" focusable="false">
+                        <path d="M17.5 8c-1.5-1.6-3.7-1.7-5.5-.6C10.2 6.3 8 6.4 6.5 8 3.7 11 5.1 18.7 9 21c1 .6 2-.5 3-.5s2 1.1 3 .5c3.9-2.3 5.3-10 2.5-13ZM12 7c.1-2.4 1.4-4 4-4-.2 2.3-1.7 3.8-4 4Z"/>
+                    </svg>
+                    <span class="bpm-vital-value"></span>
+                </span>
+            `;
             copy.append(name, vitals);
             held.className = "bpm-player-held";
             held.alt = "";
@@ -1379,7 +1405,15 @@
 
         function updatePlayerLabel(actor) {
             actor.labelName.textContent = actor.data.name;
-            actor.labelVitals.textContent = playerVitalsText(actor.data);
+            const vitals = playerVitals(actor.data);
+            actor.labelVitals.dataset.available = String(!!vitals);
+            if (vitals) {
+                actor.labelHealth.textContent = vitals.health;
+                actor.labelHunger.textContent = vitals.hunger;
+                actor.labelVitals.setAttribute("aria-label", vitals.label);
+            } else {
+                actor.labelVitals.removeAttribute("aria-label");
+            }
             actor.label.classList.toggle("bpm-offline", !actor.data.online);
             actor.label.classList.toggle("bpm-hidden-label", !settings.labels);
             const item = actor.data.mainHand || actor.data.offHand;
@@ -1492,6 +1526,8 @@
             actor.labelHead = actor.label.querySelector(".bpm-player-head");
             actor.labelName = actor.label.querySelector(".bpm-player-name");
             actor.labelVitals = actor.label.querySelector(".bpm-player-vitals");
+            actor.labelHealth = actor.label.querySelector(".bpm-vital-health .bpm-vital-value");
+            actor.labelHunger = actor.label.querySelector(".bpm-vital-hunger .bpm-vital-value");
             actor.labelHeld = actor.label.querySelector(".bpm-player-held");
             actor.labelObject = createCss2DObject(actor.label);
             actor.labelObject.position.set(0, 2.05, 0);
@@ -1789,7 +1825,7 @@
             actor.label.classList.toggle("bpm-hidden-label", !settings.labels);
             actor.labelVitals.hidden = !settings.playerVitals
                 || !actor.data.online
-                || !actor.labelVitals.textContent;
+                || actor.labelVitals.dataset.available !== "true";
             actor.nativeMarker?.element?.classList.toggle(
                 "bpm-model-ready",
                 show
